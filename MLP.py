@@ -6,10 +6,13 @@ import time
 
 tf.get_logger().setLevel('ERROR')
 
-class CustomLayer1D(tf.keras.layers.Layer):
+# Analogous classical layer to the quantum
+class CustomLayerPhaseSpace(tf.keras.layers.Layer):
     def __init__(self):
-        super(CustomLayer1D, self).__init__()
-        initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed = 42)
+        super(CustomLayerPhaseSpace, self).__init__()
+        initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=42)
+        
+        # Initialize the weights for the rotations, squeezing, translations, and nonlinear activation
         self.theta1 = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
         self.theta2 = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
         self.r = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
@@ -17,31 +20,36 @@ class CustomLayer1D(tf.keras.layers.Layer):
         self.b = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
         
     def call(self, inputs):
-        # Assuming inputs is a 1D point x0
+        # Unpack x and p components
+        x, p = inputs[..., 0], inputs[..., 1]
         
-        # 1. Initial rotation by theta1: x1 = x0 * cos(theta1)
-        x1 = tf.multiply(inputs, tf.cos(self.theta1))
+        # Apply the first rotation
+        x_rot = x * tf.cos(self.theta1) - p * tf.sin(self.theta1)
+        p_rot = x * tf.sin(self.theta1) + p * tf.cos(self.theta1)
         
-        # 2. Scaling by e^-r: x2 = e^-r * x1
-        x2 = tf.multiply(tf.exp(-self.r), x1)
+        # Apply squeezing
+        x_squeezed = tf.exp(-self.r) * x_rot
+        p_squeezed = tf.exp(self.r) * p_rot
         
-        # 3. Second rotation by theta2: x3 = x2 * cos(theta2)
-        x3 = tf.multiply(x2, tf.cos(self.theta2))
+        # Apply the second rotation
+        x_rot2 = x_squeezed * tf.cos(self.theta2) - p_squeezed * tf.sin(self.theta2)
+        p_rot2 = x_squeezed * tf.sin(self.theta2) + p_squeezed * tf.cos(self.theta2)
         
-        # Adding the bias term
-        x3_biased = x3 + self.b
+        # Apply translation
+        x_translated = x_rot2 + self.b
+        p_translated = p_rot2
         
-        # 4. Calculate the radius (distance from origin) at this point
-        radius = tf.sqrt(tf.square(x3_biased))
+        # Calculate radius for the activation
+        radius = tf.sqrt(x_translated**2 + p_translated**2)
         
-        # 5. Calculate angular velocity, which is proportional to the radius
-        angular_velocity = self.kappa * radius
+        # Apply the nonlinear activation
+        x_activated = x_translated * tf.cos(self.kappa * radius) - p_translated * tf.sin(self.kappa * radius)
+        p_activated = x_translated * tf.sin(self.kappa * radius) + p_translated * tf.cos(self.kappa * radius)
         
-        # 6. Rotate by the angular velocity
-        activation = x3_biased * tf.cos(angular_velocity)
-        
-        return activation
-    
+        # Stack the transformed components together to return a 2D output
+        outputs = tf.stack([x_activated, p_activated], axis=-1)
+        return outputs
+
 class TQDMProgressBar(tf.keras.callbacks.Callback):
     def on_train_begin(self, logs=None):
         self.epochs = self.params['epochs']
@@ -59,20 +67,20 @@ class TQDMProgressBar(tf.keras.callbacks.Callback):
         self.total_time = self.end_time - self.start_time  # Total computation time
         print(f"Total training time: {self.total_time:.2f} seconds")
 
-# Function for training models with different configurations
-def train_classical_models(configs, x_data, y_data_noisy):
+# Training models for different configurations and storing loss histories
+def train_classical_models(configs, input_data, target_data):
     trained_models = []
     histories = []
     for num_layers, epochs in configs:
         # Create a new model for each configuration
-        layers = [CustomLayer1D() for _ in range(num_layers)]
+        layers = [CustomLayerPhaseSpace() for _ in range(num_layers)]
         model = tf.keras.Sequential(layers)
 
-        # Compile and train the model
+        # When compiling the model, specify the reduction to 'none' to avoid reducing the loss
         model.compile(optimizer='adam', loss='mse')
         print(f'Training model with {num_layers} layers for {epochs} epochs...')
         progress_bar = TQDMProgressBar()
-        history = model.fit(x_data, y_data_noisy, validation_split=0.25, epochs=epochs, verbose=0, callbacks=[progress_bar])
+        history = model.fit(input_data, target_data, validation_split=0.10, epochs=epochs, verbose=0, callbacks=[progress_bar])
 
         # Store the trained model and its history
         histories.append(history)
@@ -88,10 +96,11 @@ def plot_classical_results(models, histories, configs, x_data, y_data, y_data_no
     
     # Plot the fits
     for i, model in enumerate(models):
-        y_pred = model.predict(x_data)
-        axes[i].scatter(x_data, y_data_noisy, s=5, label='Noisy Data')
-        axes[i].plot(x_data, y_pred, label='Fitted Curve', color='r')
-        axes[i].plot(x_data, y_data, label='True Curve', color='g')
+        predictions = model.predict(input_data_reshaped)
+        y_pred_x = predictions[:, 0]  # Extract the x component
+        axes[i].scatter(x_data, target_data[:, 0], s=5, label='Noisy Data')
+        axes[i].plot(x_data, y_pred_x, label='Fitted Curve', color='r')
+        axes[i].plot(x_data, y_data_clean, label='True Curve', color='g')
         axes[i].legend()
         axes[i].set_title(f'Fitted Sine Curve - Layers: {configs[i][0]}, Epochs: {configs[i][1]}')
     
@@ -124,7 +133,7 @@ def plot_classical_results(models, histories, configs, x_data, y_data, y_data_no
     plt.savefig('mses_classical.png')
 
     # Plot loss and validation loss for the best model
-    config_index = configs.index((8, 500))
+    config_index = configs.index((50, 500))
     history = histories[config_index]
     loss = history.history['loss']
     val_loss = history.history['val_loss']
@@ -142,26 +151,38 @@ def plot_classical_results(models, histories, configs, x_data, y_data, y_data_no
 # Generate noisy sine curve data
 np.random.seed(0)
 n_points = 100
+
+# Generate clean sine wave data and its derivative
 x_data = np.linspace(0, 2*np.pi, n_points)
-y_data = np.sin(x_data) 
-y_data_noisy = y_data + np.random.normal(0, 0.1, n_points)
+y_data_clean = np.sin(x_data)
+y_data_derivative_clean = np.cos(x_data)
+
+# Generate noisy sine wave data and its derivative
+y_data_noisy = y_data_clean + np.random.normal(0, 0.1, n_points)
+y_data_derivative_noisy = y_data_derivative_clean + np.random.normal(0, 0.1, n_points)
+
+# Prepare the input data by stacking the clean x and p components
+input_data = np.stack([x_data, x_data], axis=-1)
+
+# Prepare the target data by stacking the noisy x and p components
+target_data = np.stack([y_data_noisy, y_data_derivative_noisy], axis=-1)
 
 # Reshape data to fit the model's input shape
-x_data_reshaped = x_data.reshape(-1, 1)
-y_data_reshaped = y_data_noisy.reshape(-1, 1)
+input_data_reshaped = input_data.reshape(-1, 2)
+target_data_reshaped = target_data.reshape(-1, 2)
 
 # Evaluate the trained model
 configs = [
-    (6, 100),
-    (6, 250),
-    (6, 500),
-    (7, 500),
-    (8, 500),
-    (10, 500)
+    (50, 100),
+    (50, 200),
+    (50, 300),
+    (10, 500),
+    (25, 500),
+    (50, 500)
 ]
 
-# Train the models with different configurations
-trained_models, histories = train_classical_models(configs, x_data_reshaped, y_data_reshaped)
+# Train the models with different configurations using the phase space data
+trained_models, histories = train_classical_models(configs, input_data_reshaped, target_data_reshaped)
 
-# Plot the results and loss histories
-plot_classical_results(trained_models, histories, configs, x_data, y_data, y_data_noisy)
+# Plot the results and loss histories using the phase space data
+plot_classical_results(trained_models, histories, configs, x_data, y_data_clean, y_data_noisy)
