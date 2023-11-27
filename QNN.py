@@ -1,7 +1,6 @@
 import tensorrt
 import qutip as qt
 import numpy as np
-import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 from qutip import Qobj, wigner
 from tqdm import tqdm
@@ -28,28 +27,28 @@ def get_vacuum_state_tf(dim):
     vacuum_state = qt.basis(dim, 0)
     return tf.convert_to_tensor(vacuum_state.full(), dtype=tf.complex64)
 
-def tf_annihilation(dim):
+def annihilation(dim):
     diag_vals = tf.math.sqrt(tf.cast(tf.range(1, dim), dtype=tf.float32))
     diag_vals = tf.cast(diag_vals, dtype=tf.complex64)
     return tf.linalg.diag(diag_vals, k=1)
 
-def tf_number(dim):
+def number(dim):
     diag_vals = tf.range(0.0, dim, dtype=tf.float32)
     diag_vals = tf.cast(diag_vals, dtype=tf.complex64)
     return tf.linalg.diag(diag_vals)
 
-def tf_displacement_operator(dim, alpha):
+def displacement_operator(dim, alpha):
     alpha = tf.cast(alpha, dtype=tf.complex64)
-    a = tf_annihilation(dim)
+    a = annihilation(dim)
     term1 = alpha * tf.linalg.adjoint(a)
     term2 = tf.math.conj(alpha) * a
     D = tf.linalg.expm(term1 - term2)
     return D
 
-def tf_displacement_encoding(dim, alpha_vec):
+def displacement_encoding(dim, alpha_vec):
     alpha_vec = tf.cast(alpha_vec, dtype=tf.complex64)
     num = tf.shape(alpha_vec)[0]
-    a = tf_annihilation(dim)
+    a = annihilation(dim)
     term1 = tf.linalg.adjoint(a)
     term2 = a
     term1_batch = tf.tile(tf.expand_dims(term1, 0), [num, 1, 1])
@@ -58,23 +57,23 @@ def tf_displacement_encoding(dim, alpha_vec):
     D = tf.linalg.expm(alpha_vec * term1_batch - tf.math.conj(alpha_vec) * term2_batch)
     return D
 
-def tf_rotation_operator(dim, theta):
+def rotation_operator(dim, theta):
     theta = tf.cast(theta, dtype=tf.complex64)
-    n = tf_number(dim)
+    n = number(dim)
     R = tf.linalg.expm(-1j * theta * n)
     return R
 
-def tf_squeezing_operator(dim, r):
+def squeezing_operator(dim, r):
     r = tf.cast(r, dtype=tf.complex64)
-    a = tf_annihilation(dim)
+    a = annihilation(dim)
     term1 = r * tf.linalg.adjoint(a) * a
     term2 = tf.math.conj(r) * a * tf.linalg.adjoint(a)
     S = tf.linalg.expm(0.5 * (term1 - term2))
     return S
 
-def tf_kerr_operator(dim, kappa):
+def kerr_operator(dim, kappa):
     kappa = tf.cast(kappa, dtype=tf.complex64)
-    n = tf_number(dim)
+    n = number(dim)
     K = tf.linalg.expm(1j * kappa * n * n)
     return K
 
@@ -89,7 +88,7 @@ class QEncoder(tf.keras.layers.Layer):
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
         batch_vacuum_state = tf.tile(tf.expand_dims(self.vacuum_state, axis=0), [batch_size, 1, 1])
-        batch_displacement_operators = tf_displacement_encoding(self.dim, inputs)
+        batch_displacement_operators = displacement_encoding(self.dim, inputs)
         displaced_states = tf.einsum('bij,bjk->bik', batch_displacement_operators, batch_vacuum_state)
         return displaced_states
     
@@ -113,11 +112,11 @@ class QLayer(tf.keras.layers.Layer):
         batch_size = tf.shape(inputs)[0]
 
         # Compute operator tensors dynamically based on the current trainable variables
-        D_tensor = tf.expand_dims(tf_displacement_operator(self.dim, self.b), 0)
-        R_tensor_1 = tf.expand_dims(tf_rotation_operator(self.dim, self.theta_1), 0)
-        S_tensor = tf.expand_dims(tf_squeezing_operator(self.dim, self.r), 0)
-        R_tensor_2 = tf.expand_dims(tf_rotation_operator(self.dim, self.theta_2), 0)
-        K_tensor = tf.expand_dims(tf_kerr_operator(self.dim, self.kappa), 0)
+        D_tensor = tf.expand_dims(displacement_operator(self.dim, self.b), 0)
+        R_tensor_1 = tf.expand_dims(rotation_operator(self.dim, self.theta_1), 0)
+        S_tensor = tf.expand_dims(squeezing_operator(self.dim, self.r), 0)
+        R_tensor_2 = tf.expand_dims(rotation_operator(self.dim, self.theta_2), 0)
+        K_tensor = tf.expand_dims(kerr_operator(self.dim, self.kappa), 0)
 
         # Tile the operator tensors for batch processing
         D_tensor = tf.tile(D_tensor, [batch_size, 1, 1])
@@ -144,7 +143,7 @@ class QDecoder(tf.keras.layers.Layer):
         self.x_operator = self.build_x_operator()
 
     def build_x_operator(self):
-        a = tf_annihilation(self.dim)
+        a = annihilation(self.dim)
         x_operator = (a + tf.linalg.adjoint(a)) / 2.0
         x_operator = tf.expand_dims(x_operator, axis=0)  # Add batch dimension
         return x_operator
