@@ -167,7 +167,7 @@ class QDecoder(tf.keras.layers.Layer):
     
 
 # TensorFlow Custom Callback for Wigner Logarithmic Negativity    
-class WLN_Monitor(tf.keras.callbacks.Callback):
+class Wigner_Monitor(tf.keras.callbacks.Callback):
     def __init__(self, model, last_layer_index, dim, xvec, dx, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model = model
@@ -175,35 +175,28 @@ class WLN_Monitor(tf.keras.callbacks.Callback):
         self.dim = dim
         self.xvec = xvec
         self.dx = dx
-        self.wln = []
+        self.wigner_functions = []
 
-    def compute_wln(self, state_ket_array):
+    def compute_wigner(self, state_ket_array):
         state_ket_reshaped = state_ket_array.squeeze()
         state_ket = Qobj(state_ket_reshaped).unit()  # Convert to Qobj
         wigner_func = wigner(state_ket, self.xvec, self.xvec)
-        da = self.dx * self.dx
-        return np.log(np.sum(np.abs(wigner_func)*da))
+        return wigner_func
 
     def on_epoch_end(self, epoch, logs=None):
         quantum_output = tf.keras.Model(inputs=self.model.input, 
-                                            outputs=self.model.layers[self.last_layer_index].output)
+                                        outputs=self.model.layers[self.last_layer_index].output)
         
         # Predict to get the quantum states
         quantum_states = quantum_output.predict(self.xvec, verbose = 0)
 
-        # Prepare the states for parallel processing
-        state_kets_arrays = [quantum_states[i, :, 0] for i in range(quantum_states.shape[0])]
+        # Calculate Wigner function for each state
+        wigner_funcs = [self.compute_wigner(quantum_states[i, :, 0]) for i in range(quantum_states.shape[0])]
 
-        # Use ThreadPoolExecutor to parallelize the computation
-        with ThreadPoolExecutor() as executor:
-            negativities = list(executor.map(self.compute_wln, state_kets_arrays))
+        self.wigner_functions.append(wigner_funcs)
 
-        # Average negativity over the batch
-        avg_negativity = np.mean(negativities)
-        self.wln.append(avg_negativity)
-
-    def get_wln(self):
-        return self.wln
+    def get_wigner_functions(self):
+        return self.wigner_functions
 
 
 # TensorFlow Custom Layer for Classical Phase Space Transformations
@@ -282,29 +275,26 @@ class TQDMProgressBar(tf.keras.callbacks.Callback):
 
 
 # Function for training models with different configurations
-def train_models(input_data, target_data, cutoff_dim = 10, configs = [(6, 50)], qmonitor = False):
+def train_models(input_data, target_data, cutoff_dim = 10, configs = [(6, 50)]):
     trained_models = []
     histories = []
     quantumness = []
     
     for num_layers, epochs in configs:
         # Create a new model for each configuration
-        vacuum_state = get_vacuum_state_tf(cutoff_dim[0])
-        model = tf.keras.Sequential([QEncoder(dim=cutoff_dim[0], vacuum_state=vacuum_state, name='QuantumEncoding')])
+        vacuum_state = get_vacuum_state_tf(cutoff_dim)
+        model = tf.keras.Sequential([QEncoder(dim=cutoff_dim, vacuum_state=vacuum_state, name='QuantumEncoding')])
         for i in range(num_layers):
-            model.add(QLayer(dim=cutoff_dim[0], name=f'QuantumLayer_{i+1}'))
-        model.add(QDecoder(dim=cutoff_dim[0], name='QuantumDecoding'))
+            model.add(QLayer(dim=cutoff_dim, name=f'QuantumLayer_{i+1}'))
+        model.add(QDecoder(dim=cutoff_dim, name='QuantumDecoding'))
 
         # Compile and train the model
         model.compile(optimizer='adam', loss='mse')
         print(f'Training model with {num_layers} layers for {epochs} epochs...')
-        if qmonitor == True:
-            WLN = WLN_Monitor(model, -2, dim=cutoff_dim[0], xvec=input_data, dx = input_data[0]-input_data[1])
-            history = model.fit(input_data, target_data, validation_split=0.30, epochs=epochs, verbose=0, callbacks=[WLN])
-            quantumness.append(WLN.get_wln())
-        else:
-            showprogress = TQDMProgressBar()
-            history = model.fit(input_data, target_data, validation_split=0.30, epochs=epochs, verbose=0, callbacks=[showprogress])
+        showprogress = TQDMProgressBar()
+        Wigner = Wigner_Monitor(model, -2, dim=cutoff_dim, xvec=input_data, dx = input_data[0]-input_data[1])
+        history = model.fit(input_data, target_data, validation_split=0.30, epochs=epochs, verbose=0, callbacks=[showprogress, Wigner])
+        quantumness.append(Wigner.get_wigner_functions())
         print('Training Complete.')
         model.summary()
 
