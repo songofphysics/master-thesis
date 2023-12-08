@@ -10,6 +10,7 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import tensorflow as tf
+
 # Enable GPU memory growth
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
@@ -163,18 +164,17 @@ class QDecoder(tf.keras.layers.Layer):
         x_expectation = tf.einsum('bij,bjk->bi', conj_inputs_adj, operator_applied_state) 
         x_expectation = tf.squeeze(x_expectation, axis=-1)
 
-        return tf.cast(x_expectation, dtype=tf.float32)
+        return tf.math.real(x_expectation)
     
 
 # TensorFlow Custom Callback for Wigner Logarithmic Negativity    
 class Wigner_Monitor(tf.keras.callbacks.Callback):
-    def __init__(self, model, last_layer_index, dim, xvec, dx, *args, **kwargs):
+    def __init__(self, model, last_layer_index, dim, xvec, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model = model
         self.last_layer_index = last_layer_index
         self.dim = dim
         self.xvec = xvec
-        self.dx = dx
         self.wigner_functions = []
 
     def compute_wigner(self, state_ket_array):
@@ -275,7 +275,7 @@ class TQDMProgressBar(tf.keras.callbacks.Callback):
 
 
 # Function for training models with different configurations
-def train_models(input_data, target_data, cutoff_dim = 10, configs = [(6, 50)]):
+def train_models(input_data, target_data, split = 0.20, cutoff_dim = 10, configs = [(6, 50)]):
     trained_models = []
     histories = []
     quantumness = []
@@ -292,21 +292,21 @@ def train_models(input_data, target_data, cutoff_dim = 10, configs = [(6, 50)]):
         model.compile(optimizer='adam', loss='mse')
         print(f'Training model with {num_layers} layers for {epochs} epochs...')
         showprogress = TQDMProgressBar()
-        Wigner = Wigner_Monitor(model, -2, dim=cutoff_dim, xvec=input_data, dx = input_data[0]-input_data[1])
-        history = model.fit(input_data, target_data, validation_split=0.30, epochs=epochs, verbose=0, callbacks=[showprogress, Wigner])
-        quantumness.append(Wigner.get_wigner_functions())
+        Wigner = Wigner_Monitor(model, -2, dim=cutoff_dim, xvec=input_data)
+        history = model.fit(input_data, target_data, validation_split=split, epochs=epochs, verbose=0, callbacks=[showprogress, Wigner])
         print('Training Complete.')
         model.summary()
 
         # Store the trained model and its history
         histories.append(history)
         trained_models.append(model)
+        quantumness.append(Wigner.get_wigner_functions())
 
     return trained_models, histories, quantumness
 
 
 # Function for training classical models with different configurations
-def train_classical_models(configs, input_data, target_data):
+def train_classical_models(configs, input_data, target_data, split = 0.10):
     trained_models = []
     histories = []
     for num_layers, epochs in configs:
@@ -318,7 +318,7 @@ def train_classical_models(configs, input_data, target_data):
         model.compile(optimizer='adam', loss='mse')
         print(f'Training model with {num_layers} layers for {epochs} epochs...')
         progress_bar = TQDMProgressBar()
-        history = model.fit(input_data, target_data, validation_split=0.10, epochs=epochs, verbose=0, callbacks=[progress_bar])
+        history = model.fit(input_data, target_data, validation_split=split, epochs=epochs, verbose=0, callbacks=[progress_bar])
 
         # Store the trained model and its history
         histories.append(history)
