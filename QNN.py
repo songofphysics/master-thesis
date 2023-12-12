@@ -275,7 +275,7 @@ class TQDMProgressBar(tf.keras.callbacks.Callback):
 
 
 # Function for training models with different configurations
-def train_models(input_data, target_data, split = 0.20, cutoff_dim = 10, configs = [(6, 50)]):
+def train_models(input_data, target_data, split = 0.20, cutoff_dim = 10, configs = [(6, 50)], qmonitor = True):
     trained_models = []
     histories = []
     quantumness = []
@@ -292,18 +292,33 @@ def train_models(input_data, target_data, split = 0.20, cutoff_dim = 10, configs
         model.compile(optimizer='adam', loss='mse')
         print(f'Training model with {num_layers} layers for {epochs} epochs...')
         showprogress = TQDMProgressBar()
-        Wigner = Wigner_Monitor(model, -2, dim=cutoff_dim, xvec=input_data)
-        history = model.fit(input_data, target_data, validation_split=split, epochs=epochs, verbose=0, callbacks=[showprogress, Wigner])
-        print('Training Complete.')
-        model.summary()
+        if qmonitor == True:    
+            Wigner = Wigner_Monitor(model, -2, dim=cutoff_dim, xvec=input_data)
+            callback = [showprogress, Wigner]
+            history = model.fit(input_data, target_data, validation_split=split, epochs=epochs, verbose=0, callbacks=callback)
 
-        # Store the trained model and its history
-        histories.append(history)
-        trained_models.append(model)
-        quantumness.append(Wigner.get_wigner_functions())
+            # Store the trained model and its history
+            histories.append(history)
+            trained_models.append(model)
+            quantumness.append(Wigner.get_wigner_functions())
 
-    return trained_models, histories, quantumness
+            print('Training Complete.')
+            model.summary()
 
+            return trained_models, histories, quantumness
+        else:
+            callback = [showprogress]
+            history = model.fit(input_data, target_data, validation_split=split, epochs=epochs, verbose=0, callbacks=callback)
+
+            # Store the trained model and its history
+            histories.append(history)
+            trained_models.append(model)
+
+            print('Training Complete.')
+            model.summary()
+
+            return trained_models, histories
+        
 
 # Function for training classical models with different configurations
 def train_classical_models(configs, input_data, target_data, split = 0.10):
