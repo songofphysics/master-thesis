@@ -84,7 +84,7 @@ class QEncoder(tf.keras.layers.Layer):
     def __init__(self, dim, vacuum_state, **kwargs):
         super(QEncoder, self).__init__(**kwargs)
         self.dim = dim
-        self.vacuum_state = vacuum_state
+        self.vacuum_state = tf.cast(vacuum_state, dtype=tf.complex64)
 
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
