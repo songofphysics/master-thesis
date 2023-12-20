@@ -29,17 +29,15 @@ def get_vacuum_state_tf(dim):
     return tf.convert_to_tensor(vacuum_state.full(), dtype=tf.complex64)
 
 def annihilation(dim):
-    diag_vals = tf.math.sqrt(tf.cast(tf.range(1, dim), dtype=tf.float32))
-    diag_vals = tf.cast(diag_vals, dtype=tf.complex64)
+    diag_vals = tf.math.sqrt(tf.cast(tf.range(1, dim), dtype=tf.complex64))
     return tf.linalg.diag(diag_vals, k=1)
 
 def number(dim):
-    diag_vals = tf.range(0.0, dim, dtype=tf.float32)
-    diag_vals = tf.cast(diag_vals, dtype=tf.complex64)
+    diag_vals = tf.cast(tf.range(0, dim), dtype=tf.complex64)
     return tf.linalg.diag(diag_vals)
 
-def displacement_operator(dim, alpha):
-    alpha = tf.cast(alpha, dtype=tf.complex64)
+def displacement_operator(dim, x, y=0):
+    alpha = tf.complex(x, y)
     a = annihilation(dim)
     term1 = alpha * tf.linalg.adjoint(a)
     term2 = tf.math.conj(alpha) * a
@@ -106,14 +104,15 @@ class QLayer(tf.keras.layers.Layer):
         self.theta_1 = self.add_weight("theta_1", shape=[1,], initializer=initializer, trainable=True)
         self.theta_2 = self.add_weight("theta_2", shape=[1,], initializer=initializer, trainable=True)
         self.r = self.add_weight("r", shape=[1,], initializer=initializer, trainable=True)
-        self.b = self.add_weight("b", shape=[1,], initializer=initializer, trainable=True)
+        self.bx = self.add_weight("bx", shape=[1,], initializer=initializer, trainable=True)
+        self.bp = self.add_weight("bp", shape=[1,], initializer=initializer, trainable=True)
         self.kappa = self.add_weight("kappa", shape=[1,], initializer=initializer, trainable=True)
 
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
 
         # Compute operator tensors dynamically based on the current trainable variables
-        D_tensor = tf.expand_dims(displacement_operator(self.dim, self.b), 0)
+        D_tensor = tf.expand_dims(displacement_operator(self.dim, self.bx, self.bp), 0)
         R_tensor_1 = tf.expand_dims(rotation_operator(self.dim, self.theta_1), 0)
         S_tensor = tf.expand_dims(squeezing_operator(self.dim, self.r), 0)
         R_tensor_2 = tf.expand_dims(rotation_operator(self.dim, self.theta_2), 0)
