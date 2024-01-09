@@ -37,7 +37,9 @@ def number(dim):
     return tf.linalg.diag(diag_vals)
 
 def displacement_operator(dim, x, y=0):
-    alpha = tf.complex(x, y)
+    x2 = tf.identity(x)
+    y2 = tf.identity(y)
+    alpha = tf.complex(x2, y2)
     a = annihilation(dim)
     term1 = alpha * tf.linalg.adjoint(a)
     term2 = tf.math.conj(alpha) * a
@@ -57,23 +59,26 @@ def displacement_encoding(dim, alpha_vec):
     return D
 
 def rotation_operator(dim, theta):
-    theta = tf.cast(theta, dtype=tf.complex64)
+    theta2 = tf.identity(theta)
+    theta2 = tf.cast(theta2, dtype=tf.complex64)
     n = number(dim)
-    R = tf.linalg.expm(-1j * theta * n)
+    R = tf.linalg.expm(-1j * theta2 * n)
     return R
 
 def squeezing_operator(dim, r):
-    r = tf.cast(r, dtype=tf.complex64)
+    r2 = tf.identity(r)
+    r2 = tf.cast(r2, dtype=tf.complex64)
     a = annihilation(dim)
-    term1 = r * tf.linalg.adjoint(a) * a
-    term2 = tf.math.conj(r) * a * tf.linalg.adjoint(a)
+    term1 = r2 * tf.linalg.adjoint(a) * a
+    term2 = tf.math.conj(r2) * a * tf.linalg.adjoint(a)
     S = tf.linalg.expm(0.5 * (term1 - term2))
     return S
 
 def kerr_operator(dim, kappa):
-    kappa = tf.cast(kappa, dtype=tf.complex64)
+    kappa2 = tf.identity(kappa)
+    kappa2 = tf.cast(kappa2, dtype=tf.complex64)
     n = number(dim)
-    K = tf.linalg.expm(1j * kappa * n * n)
+    K = tf.linalg.expm(1j * kappa2 * n * n)
     return K
 
 
