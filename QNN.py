@@ -11,6 +11,8 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import tensorflow as tf
 
+tf.config.run_functions_eagerly(True)
+
 # Enable GPU memory growth
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
