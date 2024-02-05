@@ -10,8 +10,9 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import tensorflow as tf
+from tensorflow.keras.regularizers import l2
 
-tf.config.run_functions_eagerly(True)
+tf.config.run_functions_eagerly(False)
 
 # Enable GPU memory growth
 gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -81,6 +82,7 @@ def kerr_operator(dim, kappa):
     kappa2 = tf.cast(kappa2, dtype=tf.complex64)
     n = number(dim)
     K = tf.linalg.expm(1j * kappa2 * n * n)
+
     return K
 
 
@@ -101,19 +103,28 @@ class QEncoder(tf.keras.layers.Layer):
 
 # TensorFlow Custom Layer for Quantum Transformations
 class QLayer(tf.keras.layers.Layer):
-    def __init__(self, dim, **kwargs):
+    def __init__(self, dim, l2_lambda=0.01, **kwargs):
         super(QLayer, self).__init__(**kwargs)
         self.dim = dim
-        self.final_state = None
+        self.l2_lambda = l2_lambda
+        self.regularizer = l2(l2_lambda)
 
     def build(self, input_shape):
-        initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed = 42)
+        initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=42)
         self.theta_1 = self.add_weight("theta_1", shape=[1,], initializer=initializer, trainable=True)
         self.theta_2 = self.add_weight("theta_2", shape=[1,], initializer=initializer, trainable=True)
         self.r = self.add_weight("r", shape=[1,], initializer=initializer, trainable=True)
         self.bx = self.add_weight("bx", shape=[1,], initializer=initializer, trainable=True)
         self.bp = self.add_weight("bp", shape=[1,], initializer=initializer, trainable=True)
         self.kappa = self.add_weight("kappa", shape=[1,], initializer=initializer, trainable=True)
+
+        # Apply regularization manually
+        self.add_loss(lambda: self.regularizer(self.theta_1))
+        self.add_loss(lambda: self.regularizer(self.theta_2))
+        self.add_loss(lambda: self.regularizer(self.r))
+        self.add_loss(lambda: self.regularizer(self.bx))
+        self.add_loss(lambda: self.regularizer(self.bp))
+        self.add_loss(lambda: self.regularizer(self.kappa))
 
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
@@ -327,7 +338,7 @@ def train_models(input_data, target_data, split = 0.20, cutoff_dim = 10, configs
         
 
 # Function for training classical models with different configurations
-def train_classical_models(configs, input_data, target_data, split = 0.10):
+def train_classical_models(input_data, target_data, split = 0.10, configs = [(10,500)]):
     trained_models = []
     histories = []
     for num_layers, epochs in configs:
