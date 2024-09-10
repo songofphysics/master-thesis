@@ -12,8 +12,6 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import tensorflow as tf
 
-tf.config.run_functions_eagerly(False)
-
 # Enable GPU memory growth
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
@@ -25,6 +23,9 @@ if gpus:
     except RuntimeError as e:
         # Memory growth must be set before GPUs have been initialized
         print(e)
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.FATAL)
 
 # Utility functions
 def get_vacuum_state_tf(dim):
@@ -311,25 +312,6 @@ class ExtractXLayer(tf.keras.layers.Layer):
         # Assuming the 'x' values are the first component in the (N, 2) input
         # Extracts and returns the 'x' component in shape (N, 1)
         return tf.expand_dims(inputs[..., 0], axis=-1)
-    
-        
-# TensorFlow Custom Callback for Progress Bars
-class TQDMProgressBar(tf.keras.callbacks.Callback):
-    def on_train_begin(self, logs=None):
-        self.epochs = self.params['epochs']
-        self.progress_bar = tqdm(total=self.epochs, desc=f"Epoch 1/{self.epochs}")
-        self.start_time = time.time()  # Start time
-
-    def on_epoch_end(self, epoch, logs=None):
-        description = f"Epoch {epoch+1}/{self.epochs}"
-        self.progress_bar.set_description(description)
-        self.progress_bar.update(1)
-
-    def on_train_end(self, logs=None):
-        self.progress_bar.close()
-        self.end_time = time.time()  # End time
-        self.total_time = self.end_time - self.start_time  # Total computation time
-        print(f"Total training time: {self.total_time:.2f} seconds")
 
 
 from sklearn.model_selection import KFold
@@ -395,13 +377,13 @@ def train_classical_model(input_data, target_data, function_index, k_folds=5, le
         opt = tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0)
         model.compile(optimizer=opt, loss='mse', metrics=[R2ScoreWrapper()])
         
-        print(f'Training model with {num_layers} layers for {epochs} epochs...')
-        progress_bar = TQDMProgressBar()
-
+        # Create the ParameterLoggingCallback
+        param_logger = ParameterLoggingCallback(fold_var, function_index, x_train_fold, y_train_fold)
+        
         # Train the model
         print(f'Training on fold {fold_var}...')
         history = model.fit(x_train_fold, y_train_fold, validation_data=(x_val_fold, y_val_fold), 
-                            epochs=epochs, verbose=0, callbacks=[progress_bar])
+                            epochs=epochs, verbose=0, callbacks=[TrainingProgress()])
 
         print(f'Training on fold {fold_var} complete.')
         fold_var += 1
