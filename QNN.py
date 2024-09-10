@@ -5,12 +5,12 @@ from concurrent.futures import ThreadPoolExecutor
 from qutip import Qobj, wigner
 from tqdm import tqdm
 import time
+import csv
 import os
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import tensorflow as tf
-from tensorflow.keras.regularizers import l2
 
 tf.config.run_functions_eagerly(False)
 
@@ -99,44 +99,33 @@ class QEncoder(tf.keras.layers.Layer):
         batch_displacement_operators = displacement_encoding(self.dim, inputs)
         displaced_states = tf.einsum('bij,bjk->bik', batch_displacement_operators, batch_vacuum_state)
         return displaced_states
-    
+
 
 # TensorFlow Custom Layer for Quantum Transformations
 class QLayer(tf.keras.layers.Layer):
-    def __init__(self, dim, l2_lambda=0.01, **kwargs):
+    def __init__(self, dim, stddev=0.1, **kwargs):
         super(QLayer, self).__init__(**kwargs)
         self.dim = dim
-        self.l2_lambda = l2_lambda
-        self.regularizer = l2(l2_lambda)
+        self.stddev = stddev  # Standard deviation as a hyperparameter
 
     def build(self, input_shape):
-        initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=1.0, seed=42)
+        initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=self.stddev, seed=42)
         self.theta_1 = self.add_weight("theta_1", shape=[1,], initializer=initializer, trainable=True)
         self.theta_2 = self.add_weight("theta_2", shape=[1,], initializer=initializer, trainable=True)
         self.r = self.add_weight("r", shape=[1,], initializer=initializer, trainable=True)
         self.bx = self.add_weight("bx", shape=[1,], initializer=initializer, trainable=True)
         self.bp = self.add_weight("bp", shape=[1,], initializer=initializer, trainable=True)
-        self.kappa = self.add_weight("kappa", shape=[1,], initializer=initializer, trainable=False)
-
-        # Apply regularization manually
-        self.add_loss(lambda: self.regularizer(self.theta_1))
-        self.add_loss(lambda: self.regularizer(self.theta_2))
-        self.add_loss(lambda: self.regularizer(self.r))
-        self.add_loss(lambda: self.regularizer(self.bx))
-        self.add_loss(lambda: self.regularizer(self.bp))
-        #self.add_loss(lambda: self.regularizer(self.kappa))
+        self.kappa = self.add_weight("kappa", shape=[1,], initializer=initializer, trainable=True)
 
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
 
-        # Compute operator tensors dynamically based on the current trainable variables
         D_tensor = tf.expand_dims(displacement_operator(self.dim, self.bx, self.bp), 0)
         R_tensor_1 = tf.expand_dims(rotation_operator(self.dim, self.theta_1), 0)
         S_tensor = tf.expand_dims(squeezing_operator(self.dim, self.r), 0)
         R_tensor_2 = tf.expand_dims(rotation_operator(self.dim, self.theta_2), 0)
         K_tensor = tf.expand_dims(kerr_operator(self.dim, self.kappa), 0)
 
-        # Tile the operator tensors for batch processing
         D_tensor = tf.tile(D_tensor, [batch_size, 1, 1])
         R_tensor_1 = tf.tile(R_tensor_1, [batch_size, 1, 1])
         S_tensor = tf.tile(S_tensor, [batch_size, 1, 1])
@@ -147,8 +136,8 @@ class QLayer(tf.keras.layers.Layer):
         transformed_state = tf.einsum('bij,bjk->bik', S_tensor, transformed_state)
         transformed_state = tf.einsum('bij,bjk->bik', R_tensor_2, transformed_state)
         transformed_state = tf.einsum('bij,bjk->bik', D_tensor, transformed_state)
-        
         activated_state = tf.einsum('bij,bjk->bik', K_tensor, transformed_state)
+        
         self.final_state = activated_state
         return activated_state
     
@@ -183,37 +172,89 @@ class QDecoder(tf.keras.layers.Layer):
 
         return tf.math.real(x_expectation)
     
+# R2Score metric wrapper to handle shape issues
+class R2ScoreWrapper(tf.keras.metrics.R2Score):
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.reshape(y_true, [-1, 1])
+        y_pred = tf.reshape(y_pred, [-1, 1])
+        return super().update_state(y_true, y_pred, sample_weight)
 
-# TensorFlow Custom Callback for Wigner Logarithmic Negativity    
-class Wigner_Monitor(tf.keras.callbacks.Callback):
-    def __init__(self, model, last_layer_index, dim, xvec, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.model = model
-        self.last_layer_index = last_layer_index
-        self.dim = dim
-        self.xvec = xvec
-        self.wigner_functions = []
 
-    def compute_wigner(self, state_ket_array):
-        state_ket_reshaped = state_ket_array.squeeze()
-        state_ket = Qobj(state_ket_reshaped).unit()  # Convert to Qobj
-        wigner_func = wigner(state_ket, self.xvec, self.xvec)
-        return wigner_func
+# TensorFlow Custom Callback for Progress Bars
+from IPython.display import clear_output
 
+class TrainingProgress(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
-        quantum_output = tf.keras.Model(inputs=self.model.input, 
-                                        outputs=self.model.layers[self.last_layer_index].output)
+        logs = logs or {}
+        epoch += 1  # epochs are zero-indexed in this method
         
-        # Predict to get the quantum states
-        quantum_states = quantum_output.predict(self.xvec, verbose = 0)
+        # Get training loss, validation loss, and learning rate
+        train_loss = logs.get('loss')
+        val_loss = logs.get('val_loss')
+        lr = self.model.optimizer.lr
+        
+        # If lr is a callable (LearningRateSchedule), get its current value
+        if callable(lr):
+            lr = lr(self.model.optimizer.iterations)
+        
+        # Convert lr tensor to float
+        lr = float(lr)
 
-        # Calculate Wigner function for each state
-        wigner_funcs = [self.compute_wigner(quantum_states[i, :, 0]) for i in range(quantum_states.shape[0])]
+        print(f"Epoch: {epoch:5d} | LR: {lr:.10f} | Loss: {train_loss:.7f} | Val Loss: {val_loss:.7f}")
 
-        self.wigner_functions.append(wigner_funcs)
+        # Every 5 epochs, clear the screen
+        if epoch % 5 == 0:
+            clear_output(wait=True)
 
-    def get_wigner_functions(self):
-        return self.wigner_functions
+# TensorFlow Custom Callback for Parameter Logging
+class ParameterLoggingCallback(tf.keras.callbacks.Callback):
+    def __init__(self, fold, function_index, x_train, y_train, base_dir='Params'):
+        super(ParameterLoggingCallback, self).__init__()
+        self.fold = fold
+        self.function_index = function_index
+        self.x_train = x_train
+        self.y_train = y_train
+        self.base_dir = base_dir
+        self.params_dir = os.path.join(base_dir, f'Function_{function_index}')
+        self.filename = os.path.join(self.params_dir, f'parameters_fold_{fold}.csv')
+        self.epoch = 0
+        
+        # Create directory if it doesn't exist
+        os.makedirs(self.params_dir, exist_ok=True)
+        
+    def on_train_begin(self, logs=None):
+        # Create the CSV file for parameters and write the header
+        with open(self.filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Epoch', 'theta_1', 'r', 'theta_2', 'bx', 'bp', 'kappa'])
+        
+        # Create a CSV file for training data
+        train_data_file = os.path.join(self.params_dir, f'train_data_fold_{self.fold}.csv')
+        with open(train_data_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['x', 'y'])
+            for x, y in zip(self.x_train, self.y_train):
+                # Assuming x is a single real number and y is the target (expected output)
+                writer.writerow([x, y])
+        
+    def on_epoch_end(self, epoch, logs=None):
+        self.epoch += 1
+        params = []
+        for layer in self.model.layers:
+            if isinstance(layer, QLayer):
+                params.extend([
+                    layer.theta_1.numpy()[0],
+                    layer.r.numpy()[0],
+                    layer.theta_2.numpy()[0],
+                    layer.bx.numpy()[0],
+                    layer.bp.numpy()[0],
+                    layer.kappa.numpy()[0]
+                ])
+        
+        # Append the parameters to the CSV file
+        with open(self.filename, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([self.epoch] + params)
 
 
 # TensorFlow Custom Layer for Classical Phase Space Transformations
@@ -291,69 +332,81 @@ class TQDMProgressBar(tf.keras.callbacks.Callback):
         print(f"Total training time: {self.total_time:.2f} seconds")
 
 
-# Function for training models with different configurations
-def train_models(input_data, target_data, split = 0.20, cutoff_dim = 10, configs = [(6, 50)], qmonitor = True):
-    trained_models = []
-    histories = []
-    quantumness = []
+from sklearn.model_selection import KFold
+
+def train_model(input_data, target_data, function_index, k_folds=5, learning_rate = 0.01, std=0.1, cutoff_dim=10, num_layers=2, epochs=200):
+    fold_var = 1
     
-    for num_layers, epochs in configs:
-        # Create a new model for each configuration
+    kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+    
+    print(f'Training model for Function {function_index} with {num_layers} layers for {epochs} epochs...')
+    
+    for train_index, val_index in kf.split(input_data):
+        # Split data into training and validation for the current fold
+        x_train_fold, x_val_fold = input_data[train_index], input_data[val_index]
+        y_train_fold, y_val_fold = target_data[train_index], target_data[val_index]
+
+        # Create a new model for each fold
         vacuum_state = get_vacuum_state_tf(cutoff_dim)
         model = tf.keras.Sequential([QEncoder(dim=cutoff_dim, vacuum_state=vacuum_state, name='QuantumEncoding')])
         for i in range(num_layers):
-            model.add(QLayer(dim=cutoff_dim, name=f'QuantumLayer_{i+1}'))
+            model.add(QLayer(dim=cutoff_dim, stddev=std, name=f'QuantumLayer_{i+1}'))
         model.add(QDecoder(dim=cutoff_dim, name='QuantumDecoding'))
 
-        # Compile and train the model
-        model.compile(optimizer='adam', loss='mse')
-        print(f'Training model with {num_layers} layers for {epochs} epochs...')
-        showprogress = TQDMProgressBar()
-        if qmonitor == True:    
-            Wigner = Wigner_Monitor(model, -2, dim=cutoff_dim, xvec=input_data)
-            callback = [showprogress, Wigner]
-            history = model.fit(input_data, target_data, validation_split=split, epochs=epochs, verbose=0, callbacks=callback)
+        # Compile the model
+        opt = tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0)
+        model.compile(optimizer=opt, loss='mse', metrics=[R2ScoreWrapper()])
+        
+        # Create the ParameterLoggingCallback
+        param_logger = ParameterLoggingCallback(fold_var, function_index, x_train_fold, y_train_fold)
+        
+        # Train the model
+        print(f'Training on fold {fold_var}...')
+        history = model.fit(x_train_fold, y_train_fold, validation_data=(x_val_fold, y_val_fold), 
+                            epochs=epochs, verbose=0, callbacks=[TrainingProgress(), param_logger])
 
-            # Store the trained model and its history
-            histories.append(history)
-            trained_models.append(model)
-            quantumness.append(Wigner.get_wigner_functions())
+        print(f'Training on fold {fold_var} complete.')
+        fold_var += 1
 
-            print('Training Complete.')
-            model.summary()
+    print('Training Complete.')
+    model.summary()
 
-            return trained_models, histories, quantumness
-        else:
-            callback = [showprogress]
-            history = model.fit(input_data, target_data, validation_split=split, epochs=epochs, verbose=0, callbacks=callback)
-
-            # Store the trained model and its history
-            histories.append(history)
-            trained_models.append(model)
-
-            print('Training Complete.')
-            model.summary()
-
-            return trained_models, histories
+    return history, model
         
 
-# Function for training classical models with different configurations
-def train_classical_models(input_data, target_data, split = 0.10, configs = [(10,500)]):
-    trained_models = []
-    histories = []
-    for num_layers, epochs in configs:
+# Function for training classical models
+def train_classical_model(input_data, target_data, function_index, k_folds=5, learning_rate = 0.01, std=0.1, num_layers = 2, epochs=200):
+    fold_var = 1
+    
+    kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+    
+    print(f'Training model for Function {function_index} with {num_layers} layers for {epochs} epochs...')
+
+    for train_index, val_index in kf.split(input_data):
+        # Split data into training and validation for the current fold
+        x_train_fold, x_val_fold = input_data[train_index], input_data[val_index]
+        y_train_fold, y_val_fold = target_data[train_index], target_data[val_index]
+
         # Create a new model for each configuration
         layers = [CPLayer() for _ in range(num_layers)] + [ExtractXLayer()]
         model = tf.keras.Sequential(layers)
 
-        # When compiling the model, specify the reduction to 'none' to avoid reducing the loss
-        model.compile(optimizer='adam', loss='mse')
+        # Compile the model
+        opt = tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0)
+        model.compile(optimizer=opt, loss='mse', metrics=[R2ScoreWrapper()])
+        
         print(f'Training model with {num_layers} layers for {epochs} epochs...')
         progress_bar = TQDMProgressBar()
-        history = model.fit(input_data, target_data, validation_split=split, epochs=epochs, verbose=0, callbacks=[progress_bar])
 
-        # Store the trained model and its history
-        histories.append(history)
-        trained_models.append(model)
+        # Train the model
+        print(f'Training on fold {fold_var}...')
+        history = model.fit(x_train_fold, y_train_fold, validation_data=(x_val_fold, y_val_fold), 
+                            epochs=epochs, verbose=0, callbacks=[progress_bar])
 
-    return trained_models, histories
+        print(f'Training on fold {fold_var} complete.')
+        fold_var += 1
+
+    print('Training Complete.')
+    model.summary()
+
+    return history, model
