@@ -316,7 +316,7 @@ class ExtractXLayer(tf.keras.layers.Layer):
 
 from sklearn.model_selection import KFold
 
-def train_model(input_data, target_data, function_index, k_folds=5, learning_rate = 0.01, std=0.1, cutoff_dim=10, num_layers=2, epochs=200):
+def train_model(input_data, target_data, function_index, k_folds=5, learning_rate = 0.01, std=0.1, cutoff_dim=10, num_layers=2, epochs=200, rec = True):
     fold_var = 1
     
     kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
@@ -340,15 +340,24 @@ def train_model(input_data, target_data, function_index, k_folds=5, learning_rat
         model.compile(optimizer=opt, loss='mse', metrics=[R2ScoreWrapper()])
         
         # Create the ParameterLoggingCallback
-        param_logger = ParameterLoggingCallback(fold_var, function_index, x_train_fold, y_train_fold)
+        if rec == True:
+            param_logger = ParameterLoggingCallback(fold_var, function_index, x_train_fold, y_train_fold)
         
-        # Train the model
-        print(f'Training on fold {fold_var}...')
-        history = model.fit(x_train_fold, y_train_fold, validation_data=(x_val_fold, y_val_fold), 
-                            epochs=epochs, verbose=0, callbacks=[TrainingProgress(), param_logger])
+            # Train the model
+            print(f'Training on fold {fold_var}...')
+            history = model.fit(x_train_fold, y_train_fold, validation_data=(x_val_fold, y_val_fold), 
+                                epochs=epochs, verbose=0, callbacks=[TrainingProgress(), param_logger])
 
-        print(f'Training on fold {fold_var} complete.')
-        fold_var += 1
+            print(f'Training on fold {fold_var} complete.')
+            fold_var += 1
+        else:
+            # Train the model
+            print(f'Training on fold {fold_var}...')
+            history = model.fit(x_train_fold, y_train_fold, validation_data=(x_val_fold, y_val_fold), 
+                                epochs=epochs, verbose=0, callbacks=[TrainingProgress()])
+
+            print(f'Training on fold {fold_var} complete.')
+            fold_var += 1
 
     print('Training Complete.')
     model.summary()
