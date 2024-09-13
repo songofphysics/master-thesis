@@ -207,14 +207,11 @@ class TrainingProgress(tf.keras.callbacks.Callback):
         if epoch % 5 == 0:
             clear_output(wait=True)
 
-# TensorFlow Custom Callback for Parameter Logging
 class ParameterLoggingCallback(tf.keras.callbacks.Callback):
-    def __init__(self, fold, function_index, x_train, y_train, base_dir='Params'):
+    def __init__(self, fold, function_index, base_dir='Params'):
         super(ParameterLoggingCallback, self).__init__()
         self.fold = fold
         self.function_index = function_index
-        self.x_train = x_train
-        self.y_train = y_train
         self.base_dir = base_dir
         self.params_dir = os.path.join(base_dir, f'Function_{function_index}')
         self.filename = os.path.join(self.params_dir, f'parameters_fold_{fold}.csv')
@@ -224,33 +221,32 @@ class ParameterLoggingCallback(tf.keras.callbacks.Callback):
         os.makedirs(self.params_dir, exist_ok=True)
         
     def on_train_begin(self, logs=None):
+        # Count the number of QLayers
+        self.num_qlayers = sum(1 for layer in self.model.layers if isinstance(layer, QLayer))
+        
         # Create the CSV file for parameters and write the header
         with open(self.filename, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Epoch', 'theta_1', 'r', 'theta_2', 'bx', 'bp', 'kappa'])
-        
-        # Create a CSV file for training data
-        train_data_file = os.path.join(self.params_dir, f'train_data_fold_{self.fold}.csv')
-        with open(train_data_file, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['x', 'y'])
-            for x, y in zip(self.x_train, self.y_train):
-                # Assuming x is a single real number and y is the target (expected output)
-                writer.writerow([x, y])
+            header = ['Epoch']
+            for i in range(self.num_qlayers):
+                header.extend([f'Layer{i}_theta_1', f'Layer{i}_r', f'Layer{i}_theta_2', 
+                               f'Layer{i}_bx', f'Layer{i}_bp', f'Layer{i}_kappa'])
+            writer.writerow(header)
         
     def on_epoch_end(self, epoch, logs=None):
         self.epoch += 1
         params = []
         for layer in self.model.layers:
             if isinstance(layer, QLayer):
-                params.extend([
+                layer_params = [
                     layer.theta_1.numpy()[0],
                     layer.r.numpy()[0],
                     layer.theta_2.numpy()[0],
                     layer.bx.numpy()[0],
                     layer.bp.numpy()[0],
                     layer.kappa.numpy()[0]
-                ])
+                ]
+                params.extend(layer_params)
         
         # Append the parameters to the CSV file
         with open(self.filename, 'a', newline='') as f:
@@ -341,7 +337,7 @@ def train_model(input_data, target_data, function_index, k_folds=5, learning_rat
         
         # Create the ParameterLoggingCallback
         if rec == True:
-            param_logger = ParameterLoggingCallback(fold_var, function_index, x_train_fold, y_train_fold)
+            param_logger = ParameterLoggingCallback(fold_var, function_index)
         
             # Train the model
             print(f'Training on fold {fold_var}...')
@@ -385,9 +381,6 @@ def train_classical_model(input_data, target_data, function_index, k_folds=5, le
         # Compile the model
         opt = tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0)
         model.compile(optimizer=opt, loss='mse', metrics=[R2ScoreWrapper()])
-        
-        # Create the ParameterLoggingCallback
-        param_logger = ParameterLoggingCallback(fold_var, function_index, x_train_fold, y_train_fold)
         
         # Train the model
         print(f'Training on fold {fold_var}...')
