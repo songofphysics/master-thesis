@@ -96,9 +96,10 @@ class QEncoder(tf.keras.layers.Layer):
 
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
-        batch_vacuum_state = tf.tile(tf.expand_dims(self.vacuum_state, axis=0), [batch_size, 1, 1])
+        squeezed_vacuum_state = tf.matmul(squeezing_operator(self.dim, 100.0), self.vacuum_state)
+        batch_squeezed_state = tf.tile(tf.expand_dims(squeezed_vacuum_state, axis=0), [batch_size, 1, 1])
         batch_displacement_operators = displacement_encoding(self.dim, inputs)
-        displaced_states = tf.einsum('bij,bjk->bik', batch_displacement_operators, batch_vacuum_state)
+        displaced_states = tf.einsum('bij,bjk->bik', batch_displacement_operators, batch_squeezed_state)
         return displaced_states
 
 
