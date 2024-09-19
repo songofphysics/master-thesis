@@ -73,8 +73,9 @@ def squeezing_operator(dim, r):
     r2 = tf.identity(r)
     r2 = tf.cast(r2, dtype=tf.complex64)
     a = annihilation(dim)
-    term1 = r2 * tf.linalg.adjoint(a) * a
-    term2 = tf.math.conj(r2) * a * tf.linalg.adjoint(a)
+    adag = tf.linalg.adjoint(a)
+    term1 = tf.math.conj(r2) * tf.matmul(a,a)
+    term2 = r2 * tf.matmul(adag, adag)
     S = tf.linalg.expm(0.5 * (term1 - term2))
     return S
 
@@ -85,6 +86,15 @@ def kerr_operator(dim, kappa):
     K = tf.linalg.expm(1j * kappa2 * n * n)
 
     return K
+
+def cubic_phase_operator(dim, gamma):
+    a = annihilation(dim)
+    x = (a + tf.linalg.adjoint(a)) / 2.0
+    gamma2 = tf.identity(gamma)
+    gamma2 = tf.cast(gamma2, dtype=tf.complex64)
+    V = tf.linalg.expm(1j * (gamma2/3) * (x**3))
+
+    return V 
 
 
 # TensorFlow Custom Layer for Quantum Encoding
@@ -105,10 +115,14 @@ class QEncoder(tf.keras.layers.Layer):
 
 # TensorFlow Custom Layer for Quantum Transformations
 class QLayer(tf.keras.layers.Layer):
-    def __init__(self, dim, stddev=0.1, **kwargs):
+    def __init__(self, dim, stddev=0.1, tol=1e-9, activation='kerr', **kwargs):
         super(QLayer, self).__init__(**kwargs)
         self.dim = dim
-        self.stddev = stddev  # Standard deviation as a hyperparameter
+        self.stddev = stddev
+        self.tol = tol
+        self.activation = activation.lower()
+        if self.activation not in ['kerr', 'cubicphase']:
+            raise ValueError("Activation must be either 'kerr' or 'cubicphase'")
 
     def build(self, input_shape):
         initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=self.stddev, seed=42)
@@ -117,31 +131,47 @@ class QLayer(tf.keras.layers.Layer):
         self.r = self.add_weight("r", shape=[1,], initializer=initializer, trainable=True)
         self.bx = self.add_weight("bx", shape=[1,], initializer=initializer, trainable=True)
         self.bp = self.add_weight("bp", shape=[1,], initializer=initializer, trainable=True)
-        self.kappa = self.add_weight("kappa", shape=[1,], initializer=initializer, trainable=True)
-
-    def call(self, inputs):
-        batch_size = tf.shape(inputs)[0]
-
-        D_tensor = tf.expand_dims(displacement_operator(self.dim, self.bx, self.bp), 0)
-        R_tensor_1 = tf.expand_dims(rotation_operator(self.dim, self.theta_1), 0)
-        S_tensor = tf.expand_dims(squeezing_operator(self.dim, self.r), 0)
-        R_tensor_2 = tf.expand_dims(rotation_operator(self.dim, self.theta_2), 0)
-        K_tensor = tf.expand_dims(kerr_operator(self.dim, self.kappa), 0)
-
-        D_tensor = tf.tile(D_tensor, [batch_size, 1, 1])
-        R_tensor_1 = tf.tile(R_tensor_1, [batch_size, 1, 1])
-        S_tensor = tf.tile(S_tensor, [batch_size, 1, 1])
-        R_tensor_2 = tf.tile(R_tensor_2, [batch_size, 1, 1])
-        K_tensor = tf.tile(K_tensor, [batch_size, 1, 1])
-
-        transformed_state = tf.einsum('bij,bjk->bik', R_tensor_1, inputs)
-        transformed_state = tf.einsum('bij,bjk->bik', S_tensor, transformed_state)
-        transformed_state = tf.einsum('bij,bjk->bik', R_tensor_2, transformed_state)
-        transformed_state = tf.einsum('bij,bjk->bik', D_tensor, transformed_state)
-        activated_state = tf.einsum('bij,bjk->bik', K_tensor, transformed_state)
         
-        self.final_state = activated_state
-        return activated_state
+        if self.activation == 'kerr':
+            self.kappa = self.add_weight("kappa", shape=[1,], initializer=initializer, trainable=True)
+        else:  # cubicphase
+            self.gamma = self.add_weight("gamma", shape=[1,], initializer=initializer, trainable=True)
+
+    @tf.function
+    def check_norm(self, states):
+        norm = tf.sqrt(tf.reduce_sum(tf.abs(states)**2, axis=1, keepdims=True))
+        return tf.reduce_all(tf.abs(norm - 1) < self.tol)
+
+    @tf.function
+    def apply_and_check(self, operator, state):
+        new_state = tf.einsum('bij,bjk->bik', operator, state)
+        is_valid = self.check_norm(new_state)
+        return tf.cond(is_valid, lambda: new_state, lambda: state)
+
+    @tf.function
+    def quantum_operation(self, inputs):
+        batch_size = tf.shape(inputs)[0]
+        # Create operators
+        R_tensor_1 = tf.tile(tf.expand_dims(rotation_operator(self.dim, self.theta_1), 0), [batch_size, 1, 1])
+        S_tensor = tf.tile(tf.expand_dims(squeezing_operator(self.dim, self.r), 0), [batch_size, 1, 1])
+        R_tensor_2 = tf.tile(tf.expand_dims(rotation_operator(self.dim, self.theta_2), 0), [batch_size, 1, 1])
+        D_tensor = tf.tile(tf.expand_dims(displacement_operator(self.dim, self.bx, self.bp), 0), [batch_size, 1, 1])
+        
+        if self.activation == 'kerr':
+            A_tensor = tf.tile(tf.expand_dims(kerr_operator(self.dim, self.kappa), 0), [batch_size, 1, 1])
+        else:  # cubicphase
+            A_tensor = tf.tile(tf.expand_dims(cubic_phase_operator(self.dim, self.gamma), 0), [batch_size, 1, 1])
+
+        # Apply operations and check norm at each step
+        state = self.apply_and_check(R_tensor_1, inputs)
+        state = self.apply_and_check(S_tensor, state)
+        state = self.apply_and_check(R_tensor_2, state)
+        state = self.apply_and_check(D_tensor, state)
+        state = self.apply_and_check(A_tensor, state)
+        return state
+    
+    def call(self, inputs):
+        return self.quantum_operation(inputs)
     
     
 # TensorFlow Custom Layer for Quantum Decoding
