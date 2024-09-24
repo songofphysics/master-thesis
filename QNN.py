@@ -27,6 +27,7 @@ if gpus:
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.FATAL)
 
+
 # Utility functions
 def get_vacuum_state_tf(dim):
     vacuum_state = qt.basis(dim, 0)
@@ -74,8 +75,8 @@ def squeezing_operator(dim, r):
     r2 = tf.cast(r2, dtype=tf.complex64)
     a = annihilation(dim)
     adag = tf.linalg.adjoint(a)
-    term1 = tf.math.conj(r2) * tf.matmul(a,a)
-    term2 = r2 * tf.matmul(adag, adag)
+    term1 = tf.math.conj(r2) * (a @ a)
+    term2 = r2 * (adag @ adag)
     S = tf.linalg.expm(0.5 * (term1 - term2))
     return S
 
@@ -83,7 +84,7 @@ def kerr_operator(dim, kappa):
     kappa2 = tf.identity(kappa)
     kappa2 = tf.cast(kappa2, dtype=tf.complex64)
     n = number(dim)
-    K = tf.linalg.expm(1j * kappa2 * n * n)
+    K = tf.linalg.expm(1j * kappa2 * (n @ n))
 
     return K
 
@@ -92,7 +93,7 @@ def cubic_phase_operator(dim, gamma):
     x = (a + tf.linalg.adjoint(a)) / 2.0
     gamma2 = tf.identity(gamma)
     gamma2 = tf.cast(gamma2, dtype=tf.complex64)
-    V = tf.linalg.expm(1j * (gamma2/3) * (x**3))
+    V = tf.linalg.expm(1j * (gamma2/3) * (x @ x @ x))
 
     return V 
 
@@ -108,14 +109,16 @@ class QEncoder(tf.keras.layers.Layer):
         batch_size = tf.shape(inputs)[0]
         squeezed_vacuum_state = tf.matmul(squeezing_operator(self.dim, 100.0), self.vacuum_state)
         batch_squeezed_state = tf.tile(tf.expand_dims(squeezed_vacuum_state, axis=0), [batch_size, 1, 1])
-        batch_displacement_operators = displacement_encoding(self.dim, inputs)
+        batch_displacement_operators = displacement_encoding(self.dim, inputs/2)
         displaced_states = tf.einsum('bij,bjk->bik', batch_displacement_operators, batch_squeezed_state)
-        return displaced_states
+        norm = tf.sqrt(tf.reduce_sum(tf.abs(displaced_states)**2, axis=1, keepdims=True))
+        norm = tf.cast(norm, dtype=tf.complex64)
+        return displaced_states/norm
 
 
 # TensorFlow Custom Layer for Quantum Transformations
 class QLayer(tf.keras.layers.Layer):
-    def __init__(self, dim, stddev=0.1, tol=1e-9, activation='kerr', **kwargs):
+    def __init__(self, dim, stddev=0.05, tol=1e-9, activation='kerr', **kwargs):
         super(QLayer, self).__init__(**kwargs)
         self.dim = dim
         self.stddev = stddev
@@ -172,7 +175,7 @@ class QLayer(tf.keras.layers.Layer):
     
     def call(self, inputs):
         return self.quantum_operation(inputs)
-    
+        
     
 # TensorFlow Custom Layer for Quantum Decoding
 class QDecoder(tf.keras.layers.Layer):
@@ -204,13 +207,14 @@ class QDecoder(tf.keras.layers.Layer):
 
         return tf.math.real(x_expectation)
     
+    
 # R2Score metric wrapper to handle shape issues
 class R2ScoreWrapper(tf.keras.metrics.R2Score):
     def update_state(self, y_true, y_pred, sample_weight=None):
         y_true = tf.reshape(y_true, [-1, 1])
         y_pred = tf.reshape(y_pred, [-1, 1])
         return super().update_state(y_true, y_pred, sample_weight)
-
+    
 
 # TensorFlow Custom Callback for Progress Bars
 from IPython.display import clear_output
@@ -232,17 +236,20 @@ class TrainingProgress(tf.keras.callbacks.Callback):
         # Convert lr tensor to float
         lr = float(lr)
 
-        print(f"Epoch: {epoch:5d} | LR: {lr:.10f} | Loss: {train_loss:.7f} | Val Loss: {val_loss:.7f}")
+        print(f"Epoch: {epoch:5d} | LR: {lr:.7f} | Loss: {train_loss:.7f} | Val Loss: {val_loss:.7f}")
 
         # Every 5 epochs, clear the screen
         if epoch % 5 == 0:
             clear_output(wait=True)
 
+
+# TensorFlow Custom Callback for Parameter Logging
 class ParameterLoggingCallback(tf.keras.callbacks.Callback):
-    def __init__(self, fold, function_index, base_dir='Params'):
+    def __init__(self, fold, function_index, activation, base_dir='Params'):
         super(ParameterLoggingCallback, self).__init__()
         self.fold = fold
         self.function_index = function_index
+        self.activation = activation
         self.base_dir = base_dir
         self.params_dir = os.path.join(base_dir, f'Function_{function_index}')
         self.filename = os.path.join(self.params_dir, f'parameters_fold_{fold}.csv')
@@ -260,8 +267,12 @@ class ParameterLoggingCallback(tf.keras.callbacks.Callback):
             writer = csv.writer(f)
             header = ['Epoch']
             for i in range(self.num_qlayers):
-                header.extend([f'Layer{i}_theta_1', f'Layer{i}_r', f'Layer{i}_theta_2', 
+                if self.activation == 'kerr':
+                    header.extend([f'Layer{i}_theta_1', f'Layer{i}_r', f'Layer{i}_theta_2', 
                                f'Layer{i}_bx', f'Layer{i}_bp', f'Layer{i}_kappa'])
+                else:
+                    header.extend([f'Layer{i}_theta_1', f'Layer{i}_r', f'Layer{i}_theta_2', 
+                               f'Layer{i}_bx', f'Layer{i}_bp', f'Layer{i}_gamma'])
             writer.writerow(header)
         
     def on_epoch_end(self, epoch, logs=None):
@@ -269,14 +280,24 @@ class ParameterLoggingCallback(tf.keras.callbacks.Callback):
         params = []
         for layer in self.model.layers:
             if isinstance(layer, QLayer):
-                layer_params = [
-                    layer.theta_1.numpy()[0],
-                    layer.r.numpy()[0],
-                    layer.theta_2.numpy()[0],
-                    layer.bx.numpy()[0],
-                    layer.bp.numpy()[0],
-                    layer.kappa.numpy()[0]
-                ]
+                if self.activation == 'kerr':
+                    layer_params = [
+                        layer.theta_1.numpy()[0],
+                        layer.r.numpy()[0],
+                        layer.theta_2.numpy()[0],
+                        layer.bx.numpy()[0],
+                        layer.bp.numpy()[0],
+                        layer.kappa.numpy()[0]
+                    ]
+                else:
+                    layer_params = [
+                        layer.theta_1.numpy()[0],
+                        layer.r.numpy()[0],
+                        layer.theta_2.numpy()[0],
+                        layer.bx.numpy()[0],
+                        layer.bp.numpy()[0],
+                        layer.gamma.numpy()[0]
+                    ]    
                 params.extend(layer_params)
         
         # Append the parameters to the CSV file
@@ -287,17 +308,29 @@ class ParameterLoggingCallback(tf.keras.callbacks.Callback):
 
 # TensorFlow Custom Layer for Classical Phase Space Transformations
 class CPLayer(tf.keras.layers.Layer):
-    def __init__(self):
+    def __init__(self, stddev=0.05, activation='kerrlike'):
         super(CPLayer, self).__init__()
-        initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=42)
+        self.stddev = stddev
+        self.activation = activation
+        
+        if self.activation not in ['kerrlike', 'cubicphase']:
+            raise ValueError("Activation must be either 'kerrlike' or 'cubicphase'")
+        
+        initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=self.stddev, seed=42)
         
         # Initialize the weights for the rotations, squeezing, translations, and nonlinear activation
         self.theta1 = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
         self.theta2 = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
         self.r = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
-        self.kappa = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
-        self.b = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
+        self.bx = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
+        self.by = self.add_weight(shape=(1,), initializer=initializer, trainable=True)
         
+        # Initialize kappa or gamma based on the activation type
+        if self.activation == 'kerrlike':
+            self.kappa = self.add_weight(shape=(1,), initializer=initializer, trainable=True, name='kappa')
+        else:  # cubicphase
+            self.gamma = self.add_weight(shape=(1,), initializer=initializer, trainable=True, name='gamma')
+
     def call(self, inputs):
         # Unpack x and p components
         x, p = inputs[..., 0], inputs[..., 1]
@@ -315,15 +348,17 @@ class CPLayer(tf.keras.layers.Layer):
         p_rot2 = x_squeezed * tf.sin(self.theta2) + p_squeezed * tf.cos(self.theta2)
         
         # Apply translation
-        x_translated = x_rot2 + self.b
-        p_translated = p_rot2
+        x_translated = x_rot2 + self.bx
+        p_translated = p_rot2 + self.by
         
-        # Calculate radius for the activation
-        radius = tf.sqrt(x_translated**2 + p_translated**2)
-        
-        # Apply the nonlinear activation
-        x_activated = x_translated * tf.cos(self.kappa * radius) - p_translated * tf.sin(self.kappa * radius)
-        p_activated = x_translated * tf.sin(self.kappa * radius) + p_translated * tf.cos(self.kappa * radius)
+        # Apply the nonlinear activation based on the activation type
+        if self.activation == 'kerrlike':
+            radius = tf.sqrt(x_translated**2 + p_translated**2)
+            x_activated = x_translated * tf.cos(self.kappa * radius) - p_translated * tf.sin(self.kappa * radius)
+            p_activated = x_translated * tf.sin(self.kappa * radius) + p_translated * tf.cos(self.kappa * radius)
+        else:  # cubicphase
+            x_activated = x_translated
+            p_activated = p_translated + self.gamma * x_translated**2
         
         # Stack the transformed components together to return a 2D output
         outputs = tf.stack([x_activated, p_activated], axis=-1)
@@ -343,70 +378,79 @@ class ExtractXLayer(tf.keras.layers.Layer):
 
 from sklearn.model_selection import KFold
 
-def train_model(input_data, target_data, function_index, k_folds=5, learning_rate = 0.01, std=0.1, cutoff_dim=10, num_layers=2, epochs=200, rec = True):
-    fold_var = 1
-    
+# Function for training quantum models
+def train_model(input_data, target_data, function_index, k_folds=5, learning_rate=0.01, std=0.05, cutoff_dim=10, num_layers=2, epochs=200, non_gaussian='kerr', rec=True):
     kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
     
     print(f'Training model for Function {function_index} with {num_layers} layers for {epochs} epochs...')
     
-    for train_index, val_index in kf.split(input_data):
-        # Split data into training and validation for the current fold
+    fold_histories = []
+    models = []
+
+    for fold, (train_index, val_index) in enumerate(kf.split(input_data), 1):
+        print(f'Training on fold {fold}...')
+        
+        x_train_fold, x_val_fold = input_data[train_index], input_data[val_index]
+        y_train_fold, y_val_fold = target_data[train_index], target_data[val_index]
+
+        model = create_model(cutoff_dim, num_layers, non_gaussian, std)
+        opt = tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0)
+        model.compile(optimizer=opt, loss='mse', metrics=[R2ScoreWrapper()])
+        
+        callbacks = [TrainingProgress()]
+        if rec:
+            callbacks.append(ParameterLoggingCallback(fold, function_index, non_gaussian))
+        
+        history = model.fit(x_train_fold, y_train_fold, validation_data=(x_val_fold, y_val_fold), 
+                            epochs=epochs, verbose=0, callbacks=callbacks)
+        
+        fold_histories.append(history.history)
+        models.append(model)
+        
+        print(f'Fold {fold} complete.')
+
+    # Calculate average cross-validated histories
+    avg_history = {key: np.mean([h[key] for h in fold_histories], axis=0) for key in fold_histories[0].keys()}
+    
+    # Find the best model based on final validation loss
+    best_model_index = np.argmin([h['val_loss'][-1] for h in fold_histories])
+    best_model = models[best_model_index]
+
+    print('Cross-validation complete.')
+    print(f'Best model from fold {best_model_index + 1}')
+    best_model.summary()
+
+    return avg_history, best_model
+
+# Helper function to initialise quantum models
+def create_model(cutoff_dim, num_layers, non_gaussian, std):
+    vacuum_state = get_vacuum_state_tf(cutoff_dim)
+    model = tf.keras.Sequential([QEncoder(dim=cutoff_dim, vacuum_state=vacuum_state, name='QuantumEncoding')])
+    for i in range(num_layers):
+        model.add(QLayer(dim=cutoff_dim, activation=non_gaussian, stddev=std, tol=1e-3, name=f'QuantumLayer_{i+1}'))
+    model.add(QDecoder(dim=cutoff_dim, name='QuantumDecoding'))
+    return model
+        
+
+# Function for training classical models
+def train_classical_model(input_data, target_data, function_index, k_folds=5, learning_rate=0.01, std=0.05, non_linearity='kerrlike', num_layers=2, epochs=200):
+    
+    input_data = np.hstack((input_data, np.zeros(input_data.shape)))
+    kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+    
+    print(f'Training classical model for Function {function_index} with {num_layers} layers for {epochs} epochs...')
+    
+    fold_histories = []
+    models = []
+
+    for fold, (train_index, val_index) in enumerate(kf.split(input_data), 1):
+        print(f'Training on fold {fold}...')
+        
         x_train_fold, x_val_fold = input_data[train_index], input_data[val_index]
         y_train_fold, y_val_fold = target_data[train_index], target_data[val_index]
 
         # Create a new model for each fold
-        vacuum_state = get_vacuum_state_tf(cutoff_dim)
-        model = tf.keras.Sequential([QEncoder(dim=cutoff_dim, vacuum_state=vacuum_state, name='QuantumEncoding')])
-        for i in range(num_layers):
-            model.add(QLayer(dim=cutoff_dim, stddev=std, name=f'QuantumLayer_{i+1}'))
-        model.add(QDecoder(dim=cutoff_dim, name='QuantumDecoding'))
-
-        # Compile the model
-        opt = tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0)
-        model.compile(optimizer=opt, loss='mse', metrics=[R2ScoreWrapper()])
-        
-        # Create the ParameterLoggingCallback
-        if rec == True:
-            param_logger = ParameterLoggingCallback(fold_var, function_index)
-        
-            # Train the model
-            print(f'Training on fold {fold_var}...')
-            history = model.fit(x_train_fold, y_train_fold, validation_data=(x_val_fold, y_val_fold), 
-                                epochs=epochs, verbose=0, callbacks=[TrainingProgress(), param_logger])
-
-            print(f'Training on fold {fold_var} complete.')
-            fold_var += 1
-        else:
-            # Train the model
-            print(f'Training on fold {fold_var}...')
-            history = model.fit(x_train_fold, y_train_fold, validation_data=(x_val_fold, y_val_fold), 
-                                epochs=epochs, verbose=0, callbacks=[TrainingProgress()])
-
-            print(f'Training on fold {fold_var} complete.')
-            fold_var += 1
-
-    print('Training Complete.')
-    model.summary()
-
-    return history, model
-        
-
-# Function for training classical models
-def train_classical_model(input_data, target_data, function_index, k_folds=5, learning_rate = 0.01, std=0.1, num_layers = 2, epochs=200):
-    fold_var = 1
-    
-    kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
-    
-    print(f'Training model for Function {function_index} with {num_layers} layers for {epochs} epochs...')
-
-    for train_index, val_index in kf.split(input_data):
-        # Split data into training and validation for the current fold
-        x_train_fold, x_val_fold = input_data[train_index], input_data[val_index]
-        y_train_fold, y_val_fold = target_data[train_index], target_data[val_index]
-
-        # Create a new model for each configuration
-        layers = [CPLayer() for _ in range(num_layers)] + [ExtractXLayer()]
+        layers = [CPLayer(stddev=std, activation=non_linearity) for _ in range(num_layers)] + [ExtractXLayer()]
         model = tf.keras.Sequential(layers)
 
         # Compile the model
@@ -414,14 +458,23 @@ def train_classical_model(input_data, target_data, function_index, k_folds=5, le
         model.compile(optimizer=opt, loss='mse', metrics=[R2ScoreWrapper()])
         
         # Train the model
-        print(f'Training on fold {fold_var}...')
         history = model.fit(x_train_fold, y_train_fold, validation_data=(x_val_fold, y_val_fold), 
                             epochs=epochs, verbose=0, callbacks=[TrainingProgress()])
 
-        print(f'Training on fold {fold_var} complete.')
-        fold_var += 1
+        fold_histories.append(history.history)
+        models.append(model)
+        
+        print(f'Fold {fold} complete.')
 
-    print('Training Complete.')
-    model.summary()
+    # Calculate average cross-validated histories
+    avg_history = {key: np.mean([h[key] for h in fold_histories], axis=0) for key in fold_histories[0].keys()}
+    
+    # Find the best model based on final validation loss
+    best_model_index = np.argmin([h['val_loss'][-1] for h in fold_histories])
+    best_model = models[best_model_index]
 
-    return history, model
+    print('Cross-validation complete.')
+    print(f'Best model from fold {best_model_index + 1}')
+    best_model.summary()
+
+    return avg_history, best_model
