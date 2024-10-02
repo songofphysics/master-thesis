@@ -478,3 +478,31 @@ def train_classical_model(input_data, target_data, function_index, k_folds=5, le
     best_model.summary()
 
     return avg_history, best_model
+
+
+def cost(target_state, predicted_state):
+    target_state = tf.squeeze(target_state)
+    predicted_state = tf.squeeze(predicted_state)
+    return tf.abs(tf.reduce_sum(tf.math.conj(predicted_state) * target_state) - 1)
+
+def metric(target_state, predicted_state):
+    target_state = tf.squeeze(target_state)
+    predicted_state = tf.squeeze(predicted_state)
+    return tf.abs(tf.reduce_sum(tf.math.conj(predicted_state)*target_state))**2
+
+
+def learn_state(target_state, learning_rate=0.05, std=0.1, num_layers=10, epochs=1000, non_gaussian='kerr', rec=True):
+    cutoff_dim = np.shape(target_state)[0]
+    target_state = tf.reshape(target_state, [1,cutoff_dim,1])
+
+    model = tf.keras.Sequential(QLayer(dim=cutoff_dim, activation=non_gaussian, stddev=std, tol=1e-3, name=f'QuantumLayer_{1}'))
+    for i in range(2,num_layers+1):
+        model.add(QLayer(dim=cutoff_dim, activation=non_gaussian, stddev=std, tol=1e-3, name=f'QuantumLayer_{i}'))
+
+    opt = tf.keras.optimizers.Adam(learning_rate)
+    model.compile(optimizer=opt, loss=cost, metrics=[metric])
+
+    initial_state = tf.reshape(get_vacuum_state_tf(cutoff_dim), [1,cutoff_dim,1])
+    history = model.fit(initial_state, target_state, epochs=epochs, verbose=1)
+
+    return history, model
