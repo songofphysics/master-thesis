@@ -1,8 +1,6 @@
 import tensorrt
 import qutip as qt
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
-from qutip import Qobj, wigner
 from tqdm import tqdm
 import time
 import csv
@@ -29,183 +27,241 @@ tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.FATAL)
 
 
 # Utility functions
+@tf.function
 def get_vacuum_state_tf(dim):
-    vacuum_state = qt.basis(dim, 0)
-    return tf.convert_to_tensor(vacuum_state.full(), dtype=tf.complex64)
+    vacuum_state = tf.zeros([dim, 1], dtype=tf.complex64)
+    one = tf.constant([[1.0 + 0.0j]], dtype=tf.complex64)
+    vacuum_state = tf.concat([one, vacuum_state[1:]], axis=0)
+    return vacuum_state
 
+@tf.function
 def annihilation(dim):
-    diag_vals = tf.math.sqrt(tf.cast(tf.range(1, dim), dtype=tf.complex64))
+    diag_vals = tf.sqrt(tf.cast(tf.range(1, dim), dtype=tf.complex64))
     return tf.linalg.diag(diag_vals, k=1)
 
+@tf.function
 def number(dim):
-    diag_vals = tf.cast(tf.range(0, dim), dtype=tf.complex64)
-    return tf.linalg.diag(diag_vals)
+    return tf.linalg.diag(tf.cast(tf.range(dim), dtype=tf.complex64))
 
+@tf.function
 def displacement_operator(dim, x, y=0):
-    x2 = tf.identity(x)
-    y2 = tf.identity(y)
-    alpha = tf.complex(x2, y2)
+    alpha = tf.complex(x, y)
     a = annihilation(dim)
-    term1 = alpha * tf.linalg.adjoint(a)
-    term2 = tf.math.conj(alpha) * a
-    D = tf.linalg.expm(term1 - term2)
-    return D
+    a_dag = tf.linalg.adjoint(a)
+    exponent = alpha * a_dag - tf.math.conj(alpha) * a
+    return tf.linalg.expm(exponent)
 
+@tf.function
 def displacement_encoding(dim, alpha_vec):
     alpha_vec = tf.cast(alpha_vec, dtype=tf.complex64)
     num = tf.shape(alpha_vec)[0]
     a = annihilation(dim)
-    term1 = tf.linalg.adjoint(a)
-    term2 = a
-    term1_batch = tf.tile(tf.expand_dims(term1, 0), [num, 1, 1])
-    term2_batch = tf.tile(tf.expand_dims(term2, 0), [num, 1, 1])
+    a_dag = tf.linalg.adjoint(a)
+    
     alpha_vec = tf.reshape(alpha_vec, [-1, 1, 1])
-    D = tf.linalg.expm(alpha_vec * term1_batch - tf.math.conj(alpha_vec) * term2_batch)
-    return D
+    exponent = alpha_vec * tf.expand_dims(a_dag, 0) - tf.math.conj(alpha_vec) * tf.expand_dims(a, 0)
+    return tf.linalg.expm(exponent)
 
+@tf.function
 def rotation_operator(dim, theta):
-    theta2 = tf.identity(theta)
-    theta2 = tf.cast(theta2, dtype=tf.complex64)
+    theta = tf.cast(theta, dtype=tf.complex64)
     n = number(dim)
-    R = tf.linalg.expm(-1j * theta2 * n)
-    return R
+    return tf.linalg.expm(-1j * theta * n)
 
+@tf.function
 def squeezing_operator(dim, r):
-    r2 = tf.identity(r)
-    r2 = tf.cast(r2, dtype=tf.complex64)
+    r = tf.cast(r, dtype=tf.complex64)
     a = annihilation(dim)
-    adag = tf.linalg.adjoint(a)
-    term1 = tf.math.conj(r2) * (a @ a)
-    term2 = r2 * (adag @ adag)
-    S = tf.linalg.expm(0.5 * (term1 - term2))
-    return S
+    a_dag = tf.linalg.adjoint(a)
+    exponent = 0.5 * (tf.math.conj(r) * (a @ a) - r * (a_dag @ a_dag))
+    return tf.linalg.expm(exponent)
 
+@tf.function
 def kerr_operator(dim, kappa):
-    kappa2 = tf.identity(kappa)
-    kappa2 = tf.cast(kappa2, dtype=tf.complex64)
+    kappa = tf.cast(kappa, dtype=tf.complex64)
     n = number(dim)
-    K = tf.linalg.expm(1j * kappa2 * (n @ n))
+    return tf.linalg.expm(1j * kappa * (n @ n))
 
-    return K
-
+@tf.function
 def cubic_phase_operator(dim, gamma):
+    gamma = tf.cast(gamma, dtype=tf.complex64)
     a = annihilation(dim)
-    x = (a + tf.linalg.adjoint(a)) / 2.0
-    gamma2 = tf.identity(gamma)
-    gamma2 = tf.cast(gamma2, dtype=tf.complex64)
-    V = tf.linalg.expm(1j * (gamma2/3) * (x @ x @ x))
-
-    return V 
+    x = (a + tf.linalg.adjoint(a)) / tf.cast(2.0, dtype=tf.complex64)
+    return tf.linalg.expm(1j * (gamma/3) * (x @ x @ x))
 
 
 # TensorFlow Custom Layer for Quantum Encoding
 class QEncoder(tf.keras.layers.Layer):
-    def __init__(self, dim, vacuum_state, **kwargs):
+    def __init__(self, dim, vacuum_state, r= 100.0, **kwargs):
         super(QEncoder, self).__init__(**kwargs)
         self.dim = dim
+        self.r = r
         self.vacuum_state = tf.cast(vacuum_state, dtype=tf.complex64)
 
+    @tf.function
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
-        squeezed_vacuum_state = tf.matmul(squeezing_operator(self.dim, 100.0), self.vacuum_state)
+        squeezed_vacuum_state = tf.matmul(squeezing_operator(self.dim, self.r), self.vacuum_state)
         batch_squeezed_state = tf.tile(tf.expand_dims(squeezed_vacuum_state, axis=0), [batch_size, 1, 1])
         batch_displacement_operators = displacement_encoding(self.dim, inputs/2)
         displaced_states = tf.einsum('bij,bjk->bik', batch_displacement_operators, batch_squeezed_state)
+        
+        # Normalize the states
         norm = tf.sqrt(tf.reduce_sum(tf.abs(displaced_states)**2, axis=1, keepdims=True))
         norm = tf.cast(norm, dtype=tf.complex64)
-        return displaced_states/norm
+        normalized_states = displaced_states / norm
+        
+        # Convert to density matrices
+        density_matrices = tf.einsum('bij,bkj->bik', normalized_states, tf.math.conj(normalized_states))
+        
+        return density_matrices
 
 
 # TensorFlow Custom Layer for Quantum Transformations
 class QLayer(tf.keras.layers.Layer):
-    def __init__(self, dim, stddev=0.05, tol=1e-9, activation='kerr', **kwargs):
+    def __init__(self, dim, stddev=0.05, activation='kerr', **kwargs):
         super(QLayer, self).__init__(**kwargs)
         self.dim = dim
         self.stddev = stddev
-        self.tol = tol
         self.activation = activation.lower()
         if self.activation not in ['kerr', 'cubicphase']:
             raise ValueError("Activation must be either 'kerr' or 'cubicphase'")
 
     def build(self, input_shape):
         initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=self.stddev, seed=42)
-        self.theta_1 = self.add_weight("theta_1", shape=[1,], initializer=initializer, trainable=True)
-        self.theta_2 = self.add_weight("theta_2", shape=[1,], initializer=initializer, trainable=True)
-        self.r = self.add_weight("r", shape=[1,], initializer=initializer, trainable=True)
-        self.bx = self.add_weight("bx", shape=[1,], initializer=initializer, trainable=True)
-        self.bp = self.add_weight("bp", shape=[1,], initializer=initializer, trainable=True)
+        self.theta_1 = self.add_weight(name="theta_1", shape=[1,], initializer=initializer, trainable=True)
+        self.theta_2 = self.add_weight(name="theta_2", shape=[1,], initializer=initializer, trainable=True)
+        self.r = self.add_weight(name="r", shape=[1,], initializer=initializer, trainable=True)
+        self.bx = self.add_weight(name="bx", shape=[1,], initializer=initializer, trainable=True)
+        self.bp = self.add_weight(name="bp", shape=[1,], initializer=initializer, trainable=True)
         
         if self.activation == 'kerr':
-            self.kappa = self.add_weight("kappa", shape=[1,], initializer=initializer, trainable=True)
+            self.kappa = self.add_weight(name="kappa", shape=[1,], initializer=initializer, trainable=True)
         else:  # cubicphase
-            self.gamma = self.add_weight("gamma", shape=[1,], initializer=initializer, trainable=True)
+            self.gamma = self.add_weight(name="gamma", shape=[1,], initializer=initializer, trainable=True)
 
     @tf.function
-    def check_norm(self, states):
-        norm = tf.sqrt(tf.reduce_sum(tf.abs(states)**2, axis=1, keepdims=True))
-        return tf.reduce_all(tf.abs(norm - 1) < self.tol)
-
-    @tf.function
-    def apply_and_check(self, operator, state):
-        new_state = tf.einsum('bij,bjk->bik', operator, state)
-        is_valid = self.check_norm(new_state)
-        return tf.cond(is_valid, lambda: new_state, lambda: state)
-
-    @tf.function
-    def quantum_operation(self, inputs):
-        batch_size = tf.shape(inputs)[0]
-        # Create operators
-        R_tensor_1 = tf.tile(tf.expand_dims(rotation_operator(self.dim, self.theta_1), 0), [batch_size, 1, 1])
-        S_tensor = tf.tile(tf.expand_dims(squeezing_operator(self.dim, self.r), 0), [batch_size, 1, 1])
-        R_tensor_2 = tf.tile(tf.expand_dims(rotation_operator(self.dim, self.theta_2), 0), [batch_size, 1, 1])
-        D_tensor = tf.tile(tf.expand_dims(displacement_operator(self.dim, self.bx, self.bp), 0), [batch_size, 1, 1])
-        
-        if self.activation == 'kerr':
-            A_tensor = tf.tile(tf.expand_dims(kerr_operator(self.dim, self.kappa), 0), [batch_size, 1, 1])
-        else:  # cubicphase
-            A_tensor = tf.tile(tf.expand_dims(cubic_phase_operator(self.dim, self.gamma), 0), [batch_size, 1, 1])
-
-        # Apply operations and check norm at each step
-        state = self.apply_and_check(R_tensor_1, inputs)
-        state = self.apply_and_check(S_tensor, state)
-        state = self.apply_and_check(R_tensor_2, state)
-        state = self.apply_and_check(D_tensor, state)
-        state = self.apply_and_check(A_tensor, state)
-        return state
-    
     def call(self, inputs):
-        return self.quantum_operation(inputs)
+        batch_size = tf.shape(inputs)[0]
         
+        # Create operators
+        R_1 = rotation_operator(self.dim, self.theta_1)
+        S = squeezing_operator(self.dim, self.r)
+        R_2 = rotation_operator(self.dim, self.theta_2)
+        D = displacement_operator(self.dim, self.bx, self.bp)
+        
+        if self.activation == 'kerr':
+            A = kerr_operator(self.dim, self.kappa)
+        else:  # cubicphase
+            A = cubic_phase_operator(self.dim, self.gamma)
+
+        # Combine all operators into a single unitary
+        U = A@D@R_2@S@R_1
+        
+        # Expand U to match batch size
+        U_batch = tf.tile(tf.expand_dims(U, 0), [batch_size, 1, 1])
+        
+        # Apply the combined operation
+        return tf.einsum('bij,bjk,blk->bil', U_batch, inputs, tf.math.conj(U_batch))
+        
+
+# Tensorflow Custom Layer for Loss Channel
+class LossChannel(tf.keras.layers.Layer):    
+    def __init__(self, dim, T=1.0, **kwargs):
+        super(LossChannel, self).__init__(**kwargs)
+        self.dim = dim
+        self.T = T
+        
+    def build(self, input_shape):
+        # Get annihilation operator from external function
+        self.a = tf.cast(annihilation(self.dim), dtype=tf.complex64)
+        
+        # Channel parameters
+        self.factor = tf.cast((1 - self.T) / self.T, dtype=tf.complex64)
+        self.sqrt_T = tf.cast(tf.sqrt(self.T), dtype=tf.complex64)
+        
+        # Number operator and its transformation
+        self.a_dag_a = tf.matmul(self.a, self.a, adjoint_a=True)
+        self.sqrt_T_pow_a_dag_a = tf.linalg.expm(tf.math.log(self.sqrt_T) * self.a_dag_a)
+        
+        # Prepare Kraus operator components vectorized
+        n_range = tf.cast(tf.range(self.dim), dtype=tf.complex64)
+        factorial_term = tf.exp(tf.math.lgamma(tf.cast(n_range + 1, dtype=tf.float32)))
+        power_term = tf.exp(n_range / 2 * tf.math.log(self.factor))
+        self.E_n_diag = power_term / tf.sqrt(tf.cast(factorial_term, dtype=tf.complex64))
+        
+        # Compute powers of annihilation operator through matrix exponential
+        n_expanded = tf.reshape(n_range, (self.dim, 1, 1))
+        log_a = tf.where(
+            tf.abs(self.a) > 0,
+            tf.math.log(tf.cast(self.a, tf.complex64)),
+            tf.zeros_like(self.a, dtype=tf.complex64)
+        )
+        self.a_powers = tf.linalg.expm(n_expanded * log_a)
+        
+        super(LossChannel, self).build(input_shape)
     
+    @tf.function
+    def call(self, inputs):
+        inputs = tf.cast(inputs, dtype=tf.complex64)
+        
+        # Construct Kraus operators
+        # E_n shape: [dim, dim, dim] where first dim indexes the n different operators
+        E_n = tf.einsum('n,nij->nij', self.E_n_diag, self.a_powers)
+        E_n = tf.matmul(E_n, self.sqrt_T_pow_a_dag_a)
+        
+        # First compute E_n E_n^† for each n
+        # shape will be [dim, dim, dim]
+        E_n_E_n_dag = tf.einsum('nij,nkj->nik', E_n, tf.math.conj(E_n))
+        
+        # Now apply the sum of these operators to the state
+        # inputs shape: [batch_size, dim, dim]
+        # output shape: [batch_size, dim, dim]
+        output = tf.einsum('nik,bkj->bij', E_n_E_n_dag, inputs)
+        
+        return output
+
+
 # TensorFlow Custom Layer for Quantum Decoding
 class QDecoder(tf.keras.layers.Layer):
-    def __init__(self, dim, **kwargs):
+    def __init__(self, dim, sampling=False, num_shots=10000, **kwargs):
         super(QDecoder, self).__init__(**kwargs)
         self.dim = dim
-        self.x_operator = self.build_x_operator()
-
+        self.sampling = sampling
+        self.num_shots = num_shots
+        
+    def build(self, input_shape):
+        x_operator = self.build_x_operator()
+        self.x_quad = self.add_weight(
+            name='x_quad',
+            shape=x_operator.shape,
+            dtype=tf.complex64,
+            initializer=lambda shape, dtype: x_operator,
+            trainable=False
+        )
+        super().build(input_shape)
+        
     def build_x_operator(self):
         a = annihilation(self.dim)
         x_operator = (a + tf.linalg.adjoint(a)) / 2.0
-        x_operator = tf.expand_dims(x_operator, axis=0)  # Add batch dimension
         return x_operator
-
+        
+    @tf.function
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
-        batch_x_operator = tf.tile(self.x_operator, [batch_size, 1, 1])
 
-        # Step 1: Compute \hat{O} | \psi \rangle for each state in the batch
-        operator_applied_state = tf.einsum('bij,bjk->bik', batch_x_operator, inputs)
+        means = tf.math.real(tf.einsum('njk,jk->n', inputs, self.x_quad))
 
-        # Take the complex conjugate of each state and adjust dimensions
-        conj_inputs = tf.math.conj(inputs)  # Shape: (batch_size, dim, 1)
-        conj_inputs_adj = tf.transpose(conj_inputs, perm=[0, 2, 1])  # Shape: (batch_size, 1, dim)
-
-        # Compute the expectation value (inner product) for each state in the batch
-        x_expectation = tf.einsum('bij,bjk->bi', conj_inputs_adj, operator_applied_state) 
-        x_expectation = tf.squeeze(x_expectation, axis=-1)
-
-        return tf.math.real(x_expectation)
+        if self.sampling:
+            squares = tf.math.real(tf.einsum('njk,jk->n', 
+                        inputs, self.x_quad@self.x_quad))
+            variances = squares - tf.square(means)
+            outcomes = tf.random.normal([batch_size], seed=42)
+            outcomes = outcomes*tf.sqrt(variances/self.num_shots) + means
+            
+            return tf.expand_dims(outcomes, axis=-1)
+        else:
+            return tf.expand_dims(means, axis=-1)
     
     
 # R2Score metric wrapper to handle shape issues
@@ -379,7 +435,14 @@ class ExtractXLayer(tf.keras.layers.Layer):
 from sklearn.model_selection import KFold
 
 # Function for training quantum models
-def train_model(input_data, target_data, function_index, k_folds=5, learning_rate=0.01, std=0.05, cutoff_dim=10, num_layers=2, epochs=200, non_gaussian='kerr', rec=True):
+from sklearn.model_selection import KFold
+from tensorflow.keras.optimizers import Adam
+
+def train_model(input_data, target_data, function_index, 
+                k_folds=5, learning_rate=0.01, std=0.05, 
+                cutoff_dim=10, num_layers=2, epochs=200, 
+                non_gaussian='kerr', rec=True, sample=True):
+    
     kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
     
     print(f'Training model for Function {function_index} with {num_layers} layers for {epochs} epochs...')
@@ -393,8 +456,8 @@ def train_model(input_data, target_data, function_index, k_folds=5, learning_rat
         x_train_fold, x_val_fold = input_data[train_index], input_data[val_index]
         y_train_fold, y_val_fold = target_data[train_index], target_data[val_index]
 
-        model = create_model(cutoff_dim, num_layers, non_gaussian, std)
-        opt = tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0)
+        model = create_model(cutoff_dim, num_layers, non_gaussian, std, sampling=sample)
+        opt = Adam(learning_rate=learning_rate, clipnorm=1.0)
         model.compile(optimizer=opt, loss='mse', metrics=[R2ScoreWrapper()])
         
         callbacks = [TrainingProgress()]
@@ -418,17 +481,17 @@ def train_model(input_data, target_data, function_index, k_folds=5, learning_rat
 
     print('Cross-validation complete.')
     print(f'Best model from fold {best_model_index + 1}')
-    best_model.summary()
+    # best_model.summary()
 
     return avg_history, best_model
 
-# Helper function to initialise quantum models
-def create_model(cutoff_dim, num_layers, non_gaussian, std):
+def create_model(cutoff_dim, num_layers, non_gaussian, std, sampling=False):
     vacuum_state = get_vacuum_state_tf(cutoff_dim)
-    model = tf.keras.Sequential([QEncoder(dim=cutoff_dim, vacuum_state=vacuum_state, name='QuantumEncoding')])
+    model = tf.keras.Sequential([QEncoder(dim=cutoff_dim, vacuum_state=vacuum_state, r=2.0, name='QuantumEncoding')])
     for i in range(num_layers):
-        model.add(QLayer(dim=cutoff_dim, activation=non_gaussian, stddev=std, tol=1e-3, name=f'QuantumLayer_{i+1}'))
-    model.add(QDecoder(dim=cutoff_dim, name='QuantumDecoding'))
+        model.add(QLayer(dim=cutoff_dim, activation=non_gaussian, stddev=std, name=f'QuantumLayer_{i+1}'))
+        model.add(LossChannel(dim=cutoff_dim, T=0.75, name=f'LossChannel_{i+1}'))
+    model.add(QDecoder(dim=cutoff_dim, sampling=sampling, name='QuantumDecoding'))
     return model
         
 
