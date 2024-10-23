@@ -433,7 +433,9 @@ def create_model(cutoff_dim, num_layers, non_gaussian, std):
         
 
 # Function for training classical models
-def train_classical_model(input_data, target_data, function_index, k_folds=5, learning_rate=0.01, std=0.05, non_linearity='kerrlike', num_layers=2, epochs=200):
+def train_classical_model(input_data, target_data, function_index, 
+                          k_folds=5, learning_rate=0.01, std=0.05, num_layers=2, epochs=200,
+                          non_linearity='kerrlike', wigner_sample=False):
     
     input_data = np.hstack((input_data, np.zeros(input_data.shape)))
     kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
