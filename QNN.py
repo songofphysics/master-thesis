@@ -283,7 +283,7 @@ class TrainingProgress(tf.keras.callbacks.Callback):
         # Get training loss, validation loss, and learning rate
         train_loss = logs.get('loss')
         val_loss = logs.get('val_loss')
-        lr = self.model.optimizer.lr
+        lr = self.model.optimizer.learning_rate
         
         # If lr is a callable (LearningRateSchedule), get its current value
         if callable(lr):
