@@ -33,7 +33,7 @@ end
 
 function sample_from_wigner_rejection(wigner_matrix::Matrix{Float64}, 
                                     phase_space_bounds::Tuple{Float64,Float64,Float64,Float64},
-                                    n_samples::Int=10000)
+                                    n_samples::Int=5000)
     n_samples > 0 || throw(ArgumentError("Number of samples must be positive"))
     
     x_min, x_max, p_min, p_max = phase_space_bounds
@@ -83,7 +83,7 @@ function compute_and_sample_wigner(points::Vector{Float64};
                                  dim::Int=10, 
                                  r::Float64=100.0,
                                  bounds::Float64=7.0,
-                                 n_samples::Int=1000,
+                                 n_samples::Int=5000,
                                  output_file::String="wigner_samples.csv")
     
     # Input validation
