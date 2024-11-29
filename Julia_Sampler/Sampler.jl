@@ -82,8 +82,8 @@ end
 function compute_and_sample_wigner(points::Vector{Float64}; 
                                  dim::Int=10, 
                                  r::Float64=100.0,
-                                 bounds::Float64=5.0,
-                                 n_samples::Int=10000,
+                                 bounds::Float64=7.0,
+                                 n_samples::Int=1000,
                                  output_file::String="wigner_samples.csv")
     
     # Input validation
@@ -93,7 +93,7 @@ function compute_and_sample_wigner(points::Vector{Float64};
     n_samples > 0 || throw(ArgumentError("Number of samples must be positive"))
     
     # Create phase space grid
-    n_grid = 100
+    n_grid = 200
     x_grid = range(-bounds, bounds, length=n_grid) |> collect
     p_grid = range(-bounds, bounds, length=n_grid) |> collect
     phase_space_bounds = (-bounds, bounds, -bounds, bounds)
@@ -149,5 +149,5 @@ function compute_and_sample_wigner(points::Vector{Float64};
 end
 
 # Example usage:
-points = range(-π, π, length=300) |> collect
-samples, wigner_matrices, bounds = compute_and_sample_wigner(points)
+points = range(-π, π, length=300) |> collect;
+samples, wigner_matrices, bounds = compute_and_sample_wigner(points);
