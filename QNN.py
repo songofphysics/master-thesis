@@ -1,5 +1,4 @@
 import tensorrt
-import qutip as qt
 import numpy as np
 from tqdm import tqdm
 import time
@@ -418,7 +417,7 @@ class CPLayer(tf.keras.layers.Layer):
         return outputs
     
     
-# TensorFlow Custom Layer for Extracting Positions
+# TensorFlow Custom Layers for Extracting Positions
 class ExtractXLayer(tf.keras.layers.Layer):
     def __init__(self):
         super(ExtractXLayer, self).__init__()
@@ -427,6 +426,41 @@ class ExtractXLayer(tf.keras.layers.Layer):
         # Assuming the 'x' values are the first component in the (N, 2) input
         # Extracts and returns the 'x' component in shape (N, 1)
         return tf.expand_dims(inputs[..., 0], axis=-1)
+    
+
+# TensorFlow Custom Layer for Sampling Phase Space Points
+class WignerSamplingLayer(tf.keras.layers.Layer):
+    def __init__(self, num_samples=5000):
+        super(WignerSamplingLayer, self).__init__()
+        self.num_samples = int(num_samples)
+        wigner_data = np.loadtxt('Julia_Sampler/wigner_samples.csv', 
+                                delimiter=',', skiprows=1)[:, 1:3]
+        self.wigner_samples = tf.convert_to_tensor(wigner_data, dtype=tf.float32)
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({"num_samples": self.num_samples})
+        return config
+        
+    def call(self, inputs):
+        batch_size = tf.shape(inputs)[0]
+        samples_needed = batch_size * self.num_samples
+        return self.wigner_samples[:samples_needed]
+    
+
+# TensorFlow Custom Layers for Extracting Positions
+class SampledXLayer(tf.keras.layers.Layer):
+    def __init__(self, num_samples=5000):
+        super(SampledXLayer, self).__init__()
+        self.num_samples = int(num_samples)
+
+    def call(self, inputs):
+        x_values = inputs[..., 0]
+        batch_size = tf.shape(x_values)[0]
+        num_groups = batch_size // self.num_samples
+        reshaped = tf.reshape(x_values, [num_groups, self.num_samples])
+        averaged = tf.reduce_mean(reshaped, axis=1)
+        return tf.expand_dims(averaged, axis=-1)
 
 
 # Function for training quantum models
@@ -499,18 +533,16 @@ def train_classical_model(input_data, target_data, function_index, epochs=100,
 
 # Function for training classical models
 def train_wigner_samples(input_data, target_data, function_index, epochs=100,
-                          learning_rate=0.01, std=0.05, num_layers=6,
-                          non_linearity='kerrlike', rec=False):
+                        learning_rate=0.01, std=0.05, num_layers=6,
+                        non_linearity='kerrlike', rec=False):
     
-    input_data = np.hstack((input_data, np.zeros(input_data.shape)))
+    num_samples = 5000
     
-    print(f'Training classical model for Function {function_index} with {num_layers} layers for {epochs} epochs...')
-
-    # Create a new model for each fold
-    layers = [CPLayer(stddev=std, activation=non_linearity) for _ in range(num_layers)] + [ExtractXLayer()]
+    layers = [WignerSamplingLayer(num_samples=num_samples)]
+    layers.extend([CPLayer(stddev=std, activation=non_linearity) for _ in range(num_layers)])
+    layers.append(SampledXLayer(num_samples=num_samples))
+    
     model = tf.keras.Sequential(layers)
-
-    # Compile the model
     opt = Adam(learning_rate, clipnorm=1.0)
     model.compile(optimizer=opt, loss='mse', metrics=[R2ScoreWrapper()])
     
@@ -518,9 +550,9 @@ def train_wigner_samples(input_data, target_data, function_index, epochs=100,
     if rec:
         callbacks.append(ParameterLoggingCallback(function_index, non_linearity))
 
-    history = model.fit(input_data, target_data, validation_split=0.2, 
-                        epochs=epochs, verbose=0, callbacks=callbacks)
-
+    history = model.fit(input_data, target_data, validation_split=0.2,
+                       epochs=epochs, verbose=0, callbacks=callbacks)
+    
     return history, model
 
 
