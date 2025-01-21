@@ -470,7 +470,7 @@ from sklearn.model_selection import train_test_split
 def train_model(input_data, target_data, function_index, 
                 learning_rate=0.01, std=0.05, eta = 0.1,
                 cutoff_dim=10, num_layers=6, epochs=100, r=2.0, 
-                non_gaussian='kerr', rec=True, sample=False):
+                non_gaussian='kerr', rec=False, sample=False):
     
     x_train, x_test, y_train, y_test = train_test_split(
     input_data, target_data, test_size=0.2, random_state=42)
